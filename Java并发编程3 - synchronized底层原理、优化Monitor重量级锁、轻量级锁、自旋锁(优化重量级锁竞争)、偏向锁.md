@@ -25,25 +25,25 @@ Makr Word(存储对象自身的运行时数据，如哈希码，GC分代年龄�
 
 以 32 位虚拟机为例,普通对象的对象头结构如下，其中的`Klass Word`为`类型指针`，指向`方法区`对应的`Class对象`；
 
-![d1d6](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/d1d6.png)
+![d1d6](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/d1d6.png)
 
 
 
 数组对象
 
-![e254](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/e254.png)
+![e254](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/e254.png)
 
 
 
 对象在不同状态时，**其中 Mark Word 结构为: `无锁(001)、偏向锁(101)、轻量级锁(00)、重量级锁(10)`**
 
-![4162](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/4162.png)
+![4162](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/4162.png)
 
 
 
 所以一个对象的结构如下：
 
-![580b](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/580b.png) 
+![580b](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/580b.png) 
 
 
 
@@ -66,11 +66,11 @@ Makr Word(存储对象自身的运行时数据，如哈希码，GC分代年龄�
 >- 又来了个`Thread1`执行synchronized(obj)代码, 它首先会看看能不能执行该临界区的代码; 它会检查obj是否关联了Montior, 此时已经有关联了, 它就会去看看该Montior有没有所有者(Owner), 发现有所有者了(Thread2); Thread1 也会和该Monitor关联, 该线程就会进入到它的`EntryList(阻塞队列)`;
 >- 当 Thread2 执行完临界区代码后, Monitor的Owner(所有者)就空出来了. 此时就会通知Monitor中的EntryList阻塞队列中的线程, 这些线程通过竞争, 成为新的所有者
 
-![20201219192811839](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201219192811839.png)
+![20201219192811839](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/20201219192811839.png)
 
 --
 
-![6eba](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/6eba.png)
+![6eba](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/6eba.png)
 
 - 刚开始时`Monitor`中的Owner为null
 - 当Thread-2 执行`synchronized(obj){}`代码时就会将Monitor的所有者Owner 设置为 Thread-2，上锁成功，Monitor中同一时刻只能有一个Owner
@@ -102,7 +102,7 @@ public static void main(String[] args) {
 
 反编译后的部分字节码  `java -p  *.class`  指令
 
-![20201219201521709](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201219201521709.png)
+![20201219201521709](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/20201219201521709.png)
 
 **字节码 异常表中的信息就是，如果在锁期间发生了异常，也会释放锁。**
 
@@ -110,11 +110,11 @@ public static void main(String[] args) {
 
 小故事: 方便后面理解 `偏向锁`,`轻量级锁`
 
-![20201219202939493](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201219202939493.png) 
+![20201219202939493](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/20201219202939493.png) 
 
-![20201219203225659](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201219203225659.png) 
+![20201219203225659](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/20201219203225659.png) 
 
-![202101191526347](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/202101191526347.png) 
+![202101191526347](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/202101191526347.png) 
 
 
 
@@ -136,13 +136,13 @@ eg: 线程A来操作临界区的资源, 给资源加锁,到执行完临界区代
 
 在代码即将进入同步块时，如果此同步对象没有被锁定(锁标志位为“01”状态)，虚拟机首先在当前线程的栈帧中创建一个名为锁记录(Lock Record)的空间,用于存储锁对象目前的Mark word的拷贝，此时的状态如下图：
 
-![cc79](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/cc79.png)
+![cc79](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/cc79.png)
 
 (Object reference 在书中写做 owner)
 
 然后，虚拟机将使用CAS操作尝试把对象的Mark Word更新为指向Lock Record的指针。如果更新动作成功了，即代表该线程拥有了这个对象的锁，并且对象的Mark Word的锁标记位转变为“00”，表示此对象处于轻量级锁定状态，此时线程堆栈与对象头的状态就如下图所示：
 
-![6eaf](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/6eaf.png)
+![6eaf](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/6eaf.png)
 
 
 
@@ -167,11 +167,11 @@ eg: 线程A来操作临界区的资源, 给资源加锁,到执行完临界区代
 
 每次指向到`synchronized代码块`时(对象无锁状态下)，都会在`栈帧中`创建`锁记录（Lock Record）对象`，**`每个线程都会包括一个锁记录的结构`**，锁记录内部可以储存`对象的MarkWord`和`锁对象引用reference`:
 
-![cc79](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/cc79.png)
+![cc79](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/cc79.png)
 
 让锁记录中的Object reference指向锁对象地址，并且尝试用CAS(compare and sweep)将栈帧中的锁记录的(lock record 地址 00)替换Object对象的Mark Word，将Mark Word 的值(01)存入锁记录(lock record地址)中 ------相互替换
 
-![7660](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/7660.png)
+![7660](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/7660.png)
 
 >视频中老师讲的和《深入理解Java虚拟机》中描述的有些许出入，但是线程栈帧Lock Record和对象Mark Word最终的状态是一样的。
 
@@ -180,7 +180,7 @@ eg: 线程A来操作临界区的资源, 给资源加锁,到执行完临界区代
 - 线程中锁记录, 记录了锁对象的锁状态标志; 锁对象的对象头中存储了锁记录的地址和状态, 标志哪个线程获得了锁
 - 此时栈帧中就存储了对象的对象头中的锁状态标志,年龄计数器,哈希值等; 对象的对象头中就存储了栈帧中锁记录的地址和状态00, 这样的话对象就知道了是哪个线程拥有此锁。
 
-![6eaf](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/6eaf.png)
+![6eaf](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/6eaf.png)
 
 
 
@@ -190,7 +190,7 @@ eg: 线程A来操作临界区的资源, 给资源加锁,到执行完临界区代
 - 2、如果是自己的线程已经执行了synchronized进行加锁，那么再添加一条 Lock Record 作为重入锁的计数 – 线程多次加锁, 锁重入
   - 在下面代码中,临界区中又调用了method2, method2中又进行了一次synchronized加锁操作, 此时就会在虚拟机栈中再开辟一个method2方法对应的栈帧(栈顶), 该栈帧中又会存在一个独立的Lock Record, 此时它发现对象的对象头中指向的就是自己线程中栈帧的锁记录; 加锁也就失败了. 这种现象就叫做锁重入; 线程中有多少个锁记录, 就能表明该线程对这个对象加了几次锁 (锁重入计数)
 
-![1a3b](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/1a3b.png)
+![1a3b](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/1a3b.png)
 
 ```java
 static final Object obj = new Object();
@@ -226,14 +226,14 @@ public static void method2() {
 
 当 Thread-1 进行轻量级加锁时，Thread-0 已经对该对象加了轻量级锁, 此时发生`锁膨胀`
 
-![ea82](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/ea82.png)
+![ea82](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/ea82.png)
 
 
 
 这时Thread-1加轻量级锁失败，进入锁膨胀流程
 因为Thread-1线程加轻量级锁失败, 轻量级锁没有阻塞队列的概念, 所以此时就要为对象申请Monitor锁(重量级锁)，让Object指向重量级锁地址 10，然后自己进入Monitor 的EntryList 变成BLOCKED状态
 
-![20201219214748700](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201219214748700.png)
+![20201219214748700](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/20201219214748700.png)
 
 
 
@@ -253,11 +253,11 @@ public static void method2() {
 
 1.自旋重试成功的情况：
 
-![9c4c](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/9c4c.png)
+![9c4c](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/9c4c.png)
 
 2.`自旋重试失败的情况`，**自旋了一定次数还是没有等到 持锁的线程释放锁**, 线程2就会加入Monitor的阻塞队列(EntryList)
 
-![aef0](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/aef0.png)
+![aef0](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/aef0.png)
 
 
 
@@ -280,9 +280,9 @@ public static void method2() {
 
 
 
-![20210202174407252](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20210202174407252.png) 
+![20210202174407252](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/20210202174407252.png) 
 
-![20210202174448323](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20210202174448323.png) 
+![20210202174448323](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/20210202174448323.png) 
 
 
 
@@ -294,7 +294,7 @@ public static void method2() {
 
  64 位虚拟机 ,普通对象的Mark Word结构如下:
 
-![bbc0](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/bbc0.png)
+![bbc0](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/bbc0.png)
 
 - Normal：一般状态，没有加任何锁，前面62位保存的是对象的信息，最后2位为状态（01），倒数第三位表示是否使用偏向锁（未使用：0）
 
@@ -394,7 +394,7 @@ Class Dog{
 }
 ```
 
-![WM-Screenshots-20220427223857](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/WM-Screenshots-20220427223857.png)
+![WM-Screenshots-20220427223857](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/WM-Screenshots-20220427223857.png)
 
 可以看到，初始状态是可偏向的，一个线程获取偏向锁，锁对象的Mark Word中会记录线程ID，处于偏向锁的对象解锁后，线程ID仍存储于对象头中；其次比较两个输出结果，可以看到解析无误。
 
@@ -405,7 +405,7 @@ Class Dog{
 - 禁止偏向锁, 虚拟机参数`-XX:-UseBiasedLocking`; 优先使用轻量级锁
 - 输出结果: 最开始状态为001，然后加轻量级锁变成00，最后恢复成001
 
-![20201219231656738](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201219231656738.png)
+![20201219231656738](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/20201219231656738.png)
 
 
 
@@ -445,7 +445,7 @@ public class Test4 {
 }
 ```
 
-![WM-Screenshots-20220428114014](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/WM-Screenshots-20220428114014.png)
+![WM-Screenshots-20220428114014](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/WM-Screenshots-20220428114014.png)
 
 这里始终只有一个线程获取锁，初始为偏向锁，调用对象的一致性哈希码之后，再尝试去获取锁，发现锁对象已经升级成轻量级锁，解锁后，变成无锁状态。
 
@@ -498,7 +498,7 @@ public class Test5 {
 }
 ```
 
-![WM-Screenshots-20220428120522](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/WM-Screenshots-20220428120522.png)
+![WM-Screenshots-20220428120522](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/WM-Screenshots-20220428120522.png)
 
 可以观察到，初始状态为可偏向的，t1获取锁之后，偏向t1，调用wait()之后，锁对象升级成重量级锁，释放锁之后，之后再有线程去获取锁，都是走重量级锁流程。
 
@@ -561,7 +561,7 @@ public class Test3 {
 
 结果:
 
-![WM-Screenshots-20220428110741](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/WM-Screenshots-20220428110741.png)
+![WM-Screenshots-20220428110741](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/WM-Screenshots-20220428110741.png)
 
 输出结果，最开始使用的是偏向锁，但是第二个线程尝试获取对象锁时(前提是: 线程一已经释放掉锁了,也就是执行完synchroized代码块)，发现本来对象偏向的是线程一，那么偏向锁就会失效，加的就是轻量级锁
 
@@ -611,7 +611,7 @@ public class Test6 {
 }
 ```
 
-![WM-Screenshots-20220428144553](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/WM-Screenshots-20220428144553.png)
+![WM-Screenshots-20220428144553](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/WM-Screenshots-20220428144553.png)
 
 可以看到，19次输出之后，发生了重新偏向。
 
@@ -655,7 +655,7 @@ public String concatString(String s1,String s2,String s3){
 
 
 
-**最后申明：**
+**说明：**
 
 由于Java底层的原理在网上的解释"万紫千红"，并且程序的运行结果可能会与JDK版本等各种因素有关，我也翻阅了很多资料想尽可能地 把原理给搞清。上面的陈述不一定十分的精准，如果自己觉得那里有问题的话还是要自己去找权威的资料解决。锁优化的知识在《深入理解Java虚拟机》中有描述，也可以翻阅《Java并发编程的艺术》。
 

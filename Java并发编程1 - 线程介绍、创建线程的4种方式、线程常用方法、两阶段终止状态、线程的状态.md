@@ -239,7 +239,7 @@ public class ThreadPool {
 
 5、查看进程和线程的方法
 
-![WM-Screenshots-20220426161152](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/WM-Screenshots-20220426161152.png)
+![WM-Screenshots-20220426161152](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/WM-Screenshots-20220426161152.png)
 
 
 
@@ -269,7 +269,7 @@ public class ThreadPool {
 
 ### 3、Thread的常见方法
 
-![20201218104837363](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201218104837363.png)![20201218104857415](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201218104857415.png)
+![20201218104837363](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/20201218104837363.png)![20201218104857415](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/20201218104857415.png)
 
 
 
@@ -375,7 +375,7 @@ private static void test1() throws InterruptedException {
 
 #### 3.5、interrupt 方法详解
 
-该方法用于打断 sleep，wait，join的线程, 在阻塞期间cpu不会分配给时间片
+该方法用于打断 sleep，wait，join , park的线程, 在阻塞期间cpu不会分配给时间片
 
 - 如果一个线程在在运行中被打断，打断标记会被置为true
 - 如果是打断因sleep wait join方法而被阻塞的线程，会抛出`InterruptedException`异常，然后会将打断标记置为false
@@ -448,7 +448,7 @@ interrupt
 
 Two Phase Termination，就是考虑在一个线程T1中如何优雅地终止另一个线程T2？这里的优雅指的是给T2线程一个处理其他事情的机会（如释放锁）。
 
-![20201218122110944](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201218122110944.png)
+![20201218122110944](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/20201218122110944.png)
 
 
 
@@ -526,7 +526,7 @@ class Monitor {
 >- yiled 不释放锁、释放cpu
 >- wait 释放锁、释放cpu
 
-![20201218122903649](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201218122903649.png)
+![20201218122903649](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/20201218122903649.png)
 
 
 
@@ -543,7 +543,7 @@ class Monitor {
 
 ### 1、操作系统的层面上五种状态
 
-![fe34](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/fe34.png)
+![fe34](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/fe34.png)
 
 1. **初始状态**，仅仅是在语言层面上创建了线程对象，即Thead thread = new Thead();，还未与操作系统线程关联
 2. **可运行状态**，也称就绪状态，指该线程已经被创建，与操作系统相关联，等待cpu给它分配时间片就可运行
@@ -557,7 +557,7 @@ class Monitor {
 
 根据Thread.State 枚举，分为六种状态
 
-![20210129171228140](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20210129171228140.png)
+![20210129171228140](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/20210129171228140.png)
 
 
 

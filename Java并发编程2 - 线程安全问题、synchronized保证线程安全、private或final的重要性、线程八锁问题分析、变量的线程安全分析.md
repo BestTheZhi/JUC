@@ -1,4 +1,4 @@
-![20210202223437264](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20210202223437264.png) 
+![20210202223437264](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/20210202223437264.png) 
 
 
 
@@ -43,9 +43,9 @@ public class Test {
 
 我们从字节码的层面进行分析：**因为在Java中对变量的 自增/自减 并不是原子操作**
 
-![e0af6d100ae461307062b2631a5679e3](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/e0af6d100ae461307062b2631a5679e3.png) 
+![e0af6d100ae461307062b2631a5679e3](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/e0af6d100ae461307062b2631a5679e3.png) 
 
-![e52fadc8e19d2c448b205ab01c79deb7](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/e52fadc8e19d2c448b205ab01c79deb7.png) 
+![e52fadc8e19d2c448b205ab01c79deb7](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/e52fadc8e19d2c448b205ab01c79deb7.png) 
 
 ```tex
 getstatic i // 获取静态变量i的值
@@ -61,17 +61,17 @@ putstatic i // 将修改后的值存入静态变量i
 
 可以看到count++ 和 count-- 操作实际都是需要这个4个指令完成的，那么这里问题就来了！Java 的内存模型如下，完成静态变量的自增，自减需要在主存和工作内存中进行数据交换：
 
-![9e7c4a40edd2941dcb71bc21f257f05a](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/9e7c4a40edd2941dcb71bc21f257f05a.png) 
+![9e7c4a40edd2941dcb71bc21f257f05a](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/9e7c4a40edd2941dcb71bc21f257f05a.png) 
 
 
 
 如果代码是正常按顺序运行的，那么count的值不会计算错
 
-![12121](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/12121.png) 
+![12121](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/12121.png) 
 
 出现负数的情况：一个线程没有完成一次完整的自增/自减(多个指令) 的操作, 就被别的线程进行操作, 此时就会出现线程安全问题:
 
-![55e6](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/55e6.png) 
+![55e6](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/55e6.png) 
 
 
 
@@ -175,13 +175,13 @@ synchronized实际上利用对象锁保证了临界区代码的原子性，临�
 
 小故事:
 
-![20201219110609489](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201219110609489.png) 
+![20201219110609489](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/20201219110609489.png) 
 
-![20201219110651392](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201219110651392.png) 
+![20201219110651392](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/20201219110651392.png) 
 
 
 
-![9745](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/9745.png) 
+![9745](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/9745.png) 
 
 
 
@@ -535,7 +535,7 @@ public static void test1() {
 
 每个线程调用 test1() 方法时局部变量 i，会在每个线程的栈帧内存中被创建多份，因此不存在共享
 
-![2020121913434871](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/2020121913434871.png)
+![2020121913434871](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/2020121913434871.png)
 
 
 
@@ -720,7 +720,7 @@ if( table.get("key") == null) {
 
 这里只能是get方法内部是线程安全的, put方法内部是线程安全的. 组合起来使用还是会受到上下文切换的影响
 
-![4555](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/4555.png)
+![4555](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/4555.png)
 
 
 
