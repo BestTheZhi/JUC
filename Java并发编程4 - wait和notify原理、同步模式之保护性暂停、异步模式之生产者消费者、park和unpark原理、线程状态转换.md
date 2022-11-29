@@ -23,7 +23,7 @@
 
 处于BLOCKED状态的线程会在锁被释放的时候被唤醒
 
-处于WAITING状态的线程只有被锁对象调用了notify方法(obj.notify/obj.notifyAll)，才会被唤醒。然后它会进入到EntryList, 重新竞争锁。
+处于WAITING状态的线程只有被**锁对象**调用了notify方法(obj.notify/obj.notifyAll)，才会被唤醒。然后它会进入到EntryList, 重新竞争锁。
 
 
 
@@ -572,9 +572,7 @@ throws InterruptedException {
     }
 
     if (millis == 0) {
-        //防止main线程被打断
         while (isAlive()) {
-            //只要t1线程还存活，main线程，在t1的WaitSet中等待
             wait(0);  //异常从方法上抛出
         }
     } else {
@@ -955,7 +953,7 @@ LockSupport.unpark(thread);
 - 2、RUNNABLE <–> WAITING
   - 线程用synchronized(obj)获取了对象锁后
   - 调用 obj.wait()方法时，t 线程进入waitSet中, 从RUNNABLE --> WAITING
-  - 调用 obj.notify()，obj.notifyAll()，t.interrupt() 时, 唤醒的线程都到entrySet阻塞队列成为BLOCKED状态, 在阻塞队列,和其他线程再进行 竞争锁
+  - 调用 obj.notify()，obj.notifyAll()，**t.interrupt()** 时, 唤醒的线程都到entrySet阻塞队列成为BLOCKED状态, 在阻塞队列,和其他线程再进行 竞争锁
     - 竞争锁成功，t 线程从 WAITING --> RUNNABLE
     - 竞争锁失败，t 线程从 WAITING --> BLOCKED
 - 3、RUNNABLE <–> WAITING

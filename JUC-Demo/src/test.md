@@ -1,2235 +1,734 @@
-# MyBatis
+## 一、 锁优化
 
-![1](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/FrameWork/1.png)
+### 1、 Java 对象头
 
-## 一、简介
+对象头包含两部分：运行时元数据（Mark Word）和类型指针 (Klass Word)
 
-### 1、什么是MyBatis?
+1.运行时元数据
 
-- MyBatis 是一款优秀的**持久层**框架。
-- 它支持自定义 SQL、存储过程以及高级映射。
-- MyBatis 免除了几乎所有的 JDBC 代码以及设置参数和获取结果集的工作。
-- MyBatis 可以通过简单的 XML 或注解来配置和映射原始类型、接口和 Java POJO（Plain Old Java Objects，普通老式 Java 对象 即实体类）为数据库中的记录。
-- MyBatis 本是apache的一个开源项目iBatis, 2010年这个项目由apache software foundation 迁移到了google code，并且改名为MyBatis 。2013年11月迁移到Github。
+- `哈希值（HashCode）`，可以看作是堆中对象的地址
+- `GC分代年龄（年龄计数器）` (用于新生代from/to区晋升老年代的标准, 阈值为15)
+- 锁状态标志 (用于JDK1.6对synchronized的优化 -> 轻量级锁)
+- 线程持有的锁
+- 偏向线程ID (用于JDK1.6对synchronized的优化 -> 偏向锁)
+- 偏向时间戳
+
+2.类型指针
+
+- 指向`类元数据InstanceKlass`，确定该对象所属的类型。指向的其实是方法区中存放的类元信息
+
+说明：如果对象是数组，还需要记录数组的长度
 
 
 
-### 2、如何获取MyBatis？
+Mark Word(存储对象自身的运行时数据，如哈希码，GC分代年龄等，在32位和64位的Java虚拟机中分别会占用32或64个比特)
 
-- Maven仓库
+以 32 位虚拟机为例,普通对象的对象头结构如下，其中的`Klass Word`为`类型指针`，指向`方法区`对应的`Class对象`；
+
+![d1d6](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/d1d6.png)
+
+
+
+数组对象
+
+![e254](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/e254.png)
+
+
+
+对象在不同状态时，**其中 Mark Word 结构为: `无锁(001)、偏向锁(101)、轻量级锁(00)、重量级锁(10)`**
+
+![4162](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/4162.png)
+
+
+
+所以一个对象的结构如下：
+
+![580b](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/580b.png)
+
+
+
+### 2、 Monitor 原理 (Synchronized底层实现-重量级锁)
+
+>**多线程同时访问临界区: 使用重量级锁**
+>
+>- JDK6对Synchronized的优先状态：`偏向锁–>轻量级锁–>重量级锁`
+
+`Monitor`被翻译为`监视器`或者`管程`
+
+每个Java对象都可以关联一个(操作系统的)Monitor，如果使用synchronized给对象上锁（重量级），该`对象头的MarkWord`中就被设置为指向Monitor对象的指针
+
+>下图原理解释:
+>
+>当Thread2访问到synchronized(obj)中的共享资源的时候
+>
+>- 首先会将synchronized中的`锁对象`中对象头的MarkWord去尝试指向操作系统的Monitor对象. 让锁对象中的MarkWord和Monitor对象相关联. 如果关联成功, 将obj对象头中的MarkWord的对象状态从01改为10。
+>- 因为Monitor没有和其他的obj的MarkWord相关联, 所以Thread2就成为了该Monitor的Owner(所有者)。
+>- 又来了个`Thread1`执行synchronized(obj)代码, 它首先会看看能不能执行该临界区的代码; 它会检查obj是否关联了Montior, 此时已经有关联了, 它就会去看看该Montior有没有所有者(Owner), 发现有所有者了(Thread2); Thread1 也会和该Monitor关联, 该线程就会进入到它的`EntryList(阻塞队列)`;
+>- 当 Thread2 执行完临界区代码后, Monitor的Owner(所有者)就空出来了. 此时就会通知Monitor中的EntryList阻塞队列中的线程, 这些线程通过竞争, 成为新的所有者
+
+![20201219192811839](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201219192811839.png)
+
+--
+
+![6eba](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/6eba.png)
+
+- 刚开始时`Monitor`中的Owner为null
+- 当Thread-2 执行`synchronized(obj){}`代码时就会将Monitor的所有者Owner 设置为 Thread-2，上锁成功，Monitor中同一时刻只能有一个Owner
+- 当Thread-2 占据锁时，如果线程Thread-3，Thread-4也来执行synchronized(obj){}代码，就会进入EntryList中变成`BLOCKED状态`
+- Thread-2 执行完同步代码块的内容，然后唤醒 EntryList 中等待的线程来竞争锁，竞争时是非公平的 (仍然是抢占式)
+- **图中 WaitSet 中的Thread-0，Thread-1 是之前获得过锁，但条件不满足进入 WAITING 状态的线程**，后面讲wait-notify 时会分析
+
+
+
+>它加锁就是依赖底层操作系统的 `mutex`相关指令实现, 所以会造成`用户态和内核态之间的切换`, 非常耗性能 !
+>
+>在JDK6的时候, 对synchronized进行了优化, 引入了`轻量级锁, 偏向锁`, 它们是在JVM的层面上进行加锁逻辑, 就没有了切换时性能的消耗~
+
+
+
+### 3、synchronized原理
+
+实例代码：
+
+```java
+static final Object lock = new Object();
+static int counter = 0;
+public static void main(String[] args) {
+    synchronized (lock) { 
+        counter++;
+    }
+}
+```
+
+反编译后的部分字节码  `java -p  *.class`  指令
+
+![20201219201521709](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201219201521709.png)
+
+**字节码 异常表中的信息就是，如果在锁期间发生了异常，也会释放锁。**
+
+### 4、synchronized 原理进阶
+
+小故事: 方便后面理解 `偏向锁`,`轻量级锁`
+
+![20201219202939493](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201219202939493.png)
+
+![20201219203225659](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201219203225659.png)
+
+![202101191526347](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/202101191526347.png)
+
+
+
+### 5、轻量级锁 (用于优化Monitor这类的重量级锁）
+
+>轻量级锁的设计初衷实在没有多线程竞争的前提下，减少传统的重量级锁使用操作系统互斥量产生的性能消耗。
+
+轻量级锁的使用场景: 如果一个对象虽然有多个线程要对它进行加锁，但是加锁的时间是错开的（也就是没有人可以竞争的），那么可以使用轻量级锁来进行优化。
+
+轻量级锁对使用者是透明的，即语法仍然是synchronized (jdk6对synchronized的优化)，假设有两个方法同步块，利用同一个对象加锁
+
+eg: 线程A来操作临界区的资源, 给资源加锁,到执行完临界区代码,释放锁的过程, 没有线程来竞争, 此时就可以使用轻量级锁; 如果**这期间有线程来竞争的话, 就会升级为重量级锁**
+
+
+
+#### 轻量级锁的工作过程
+
+--参考自《深入理解Java虚拟机》
+
+在代码即将进入同步块时，如果此同步对象没有被锁定(锁标志位为“01”状态)，虚拟机首先在当前线程的栈帧中创建一个名为锁记录(Lock Record)的空间,用于存储锁对象目前的Mark word的拷贝，此时的状态如下图：
+
+![cc79](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/cc79.png)
+
+(Object reference 在书中写做 owner)
+
+然后，虚拟机将使用CAS操作尝试把对象的Mark Word更新为指向Lock Record的指针。如果更新动作成功了，即代表该线程拥有了这个对象的锁，并且对象的Mark Word的锁标记位转变为“00”，表示此对象处于轻量级锁定状态，此时线程堆栈与对象头的状态就如下图所示：
+
+![6eaf](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/6eaf.png)
+
+
+
+如果这个更新操作失败了，那就意味着至少存在一条线程与当前线程竞争获取该对象的锁。虚拟机首先会检查对象的Mark Word是否指向当前线程的栈帧：
+
+- 如果是：说明当前线程已经拥有了这个对象的锁，那直接进入同步块中继续执行就可以了。
+- 否则：**就说明这个锁对象已经被其他线程抢占。如果出现两条以上的线程争用同一个锁的情况，那轻量级锁就不再有效，必须膨胀为重量级锁**，锁标志的状态变为“10”，此时Mark Word中存储的就是指向重量级锁(互斥量)的指针，后面等待锁的线程也必须进入阻塞状态。
+
+
+
+它的解锁过程也同样是通过CAS操作来进行的，如果对象的Mark Word仍然指向线程的锁记录，那就用CAS操作把对象当前的Mark Word和线程中复制的Mark Word替换回来。假如能够成功替换，那整个同步过程就顺利完成了，如果替换失败，则是说有其他线程尝试过获取该锁，就要在释放锁的同时，唤醒被挂起的线程。
+
+轻量级锁能提升程序同步性能的依据是“对于绝大部分的锁，在整个同步周期内都是不存在竞争的”这一经验法则。如果没有竞争，轻量级锁便通过CAS操作，成功避免了使用互斥量的开销；但如果确实存在锁竞争，除了互斥量的本身开销外，还额外发生了CAS操作的开销。因此在有竞争的情况下，轻量级锁反而会比传统的重量级锁更慢。
+
+
+
+---
+
+
+
+-- 视频中老师是这样描述的：
+
+每次指向到`synchronized代码块`时(对象无锁状态下)，都会在`栈帧中`创建`锁记录（Lock Record）对象`，**`每个线程都会包括一个锁记录的结构`**，锁记录内部可以储存`对象的MarkWord`和`锁对象引用reference`:
+
+![cc79](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/cc79.png)
+
+让锁记录中的Object reference指向锁对象地址，并且尝试用CAS(compare and swap)将栈帧中的锁记录的(lock record 地址 00)替换Object对象的Mark Word，将Mark Word 的值(01)存入锁记录(lock record地址)中 ------相互替换
+
+![7660](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/7660.png)
+
+>视频中老师讲的和《深入理解Java虚拟机》中描述的有些许出入，但是线程栈帧Lock Record和对象Mark Word最终的状态是一样的。
+
+如果CAS替换成功, 获得了轻量级锁，那么对象的对象头储存的就是锁记录的地址和状态00，如下所示：
+
+- 线程中锁记录, 记录了锁对象的锁状态标志; 锁对象的对象头中存储了锁记录的地址和状态, 标志哪个线程获得了锁
+- 此时栈帧中就存储了对象的对象头中的锁状态标志,年龄计数器,哈希值等; 对象的对象头中就存储了栈帧中锁记录的地址和状态00, 这样的话对象就知道了是哪个线程拥有此锁。
+
+![6eaf](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/6eaf.png)
+
+
+
+如果CAS替换失败，有两种情况 : ① 锁膨胀 ② 重入锁失败
+
+- 1、如果是其它线程已经持有了该Object的轻量级锁，那么表示有竞争，将进入 锁膨胀阶段(此时对象Object对象头中已经存储了别的线程的锁记录地址 00,指向了其他线程)
+- 2、如果是自己的线程已经执行了synchronized进行加锁，那么再添加一条 Lock Record 作为重入锁的计数 – 线程多次加锁, 锁重入
+  - 在下面代码中,临界区中又调用了method2, method2中又进行了一次synchronized加锁操作, 此时就会在虚拟机栈中再开辟一个method2方法对应的栈帧(栈顶), 该栈帧中又会存在一个独立的Lock Record, 此时它发现对象的对象头中指向的就是自己线程中栈帧的锁记录; 加锁也就失败了. 这种现象就叫做锁重入; 线程中有多少个锁记录, 就能表明该线程对这个对象加了几次锁 (锁重入计数)
+
+![1a3b](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/1a3b.png)
+
+```java
+static final Object obj = new Object();
+public static void method1() {
+     synchronized( obj ) {
+         // 同步块 A
+         method2();
+     }
+}
+public static void method2() {
+     synchronized( obj ) {
+         // 同步块 B
+     }
+}
+```
+
+
+
+轻量级锁解锁流程 :
+
+当线程退出synchronized代码块的时候，如果获取的是取值为 null 的锁记录 ，表示有锁重入，这时重置锁记录，表示重入计数减一
+
+当线程退出synchronized代码块的时候，如果获取的锁记录取值不为 null，那么使用CAS将Mark Word的值恢复给对象, 将直接替换的内容还原。
+
+- 成功则解锁成功 (轻量级锁解锁成功)
+- 失败，表示有竞争, 则说明轻量级锁进行了锁膨胀或已经升级为重量级锁，进入重量级锁解锁流程 (Monitor流程)
+
+
+
+### 6、锁膨胀
+
+如果在尝试`加轻量级锁`的过程中，`CAS替换操作无法成功`，这时**有一种情况就是其它线程已经为这个对象加上了轻量级锁**，这时就要进行`锁膨胀(有竞争)`，将轻量级锁变成重量级锁。
+
+当 Thread-1 进行轻量级加锁时，Thread-0 已经对该对象加了轻量级锁, 此时发生`锁膨胀`
+
+![ea82](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/ea82.png)
+
+
+
+这时Thread-1加轻量级锁失败，进入锁膨胀流程
+因为Thread-1线程加轻量级锁失败, 轻量级锁没有阻塞队列的概念, 所以此时就要为对象申请Monitor锁(重量级锁)，让Object指向重量级锁地址 10，然后自己进入Monitor 的EntryList 变成BLOCKED状态
+
+![20201219214748700](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201219214748700.png)
+
+
+
+当Thread-0 线程执行完synchronized同步块时，使用CAS将Mark Word的值恢复给对象头, 肯定恢复失败(因为对象的对象头中存储的是重量级锁的地址,状态变为10了之前的是00)。那么会进入重量级锁的解锁过程，即按照Monitor的地址找到Monitor对象，将Owner设置为null，唤醒EntryList中的Thread-1线程。
+
+
+
+### 7、自旋锁与自适应自旋
+
+**互斥同步对性能最大的影响是阻塞的实现，挂起线程和恢复线程的操作都需要转入内核态中完成，这些操作给Java虚拟机的并发性能带来了很大的压力**。同时，虚拟机的开发团队也注意到在许多应用上，**共享数据的锁定状态只会持续很短的一段时间，为了这段时间去挂起和恢复线程并不值得**。现在绝大多数的个人电脑和服务器都是多路（核）处理器系统，如果物理机器有一个以上的处理器或者处理器核心，能让两个或以上的线程同时并行执行，我们就可以让后面请求锁的那个线程“稍等一会”，但不放弃处理器的执行时间，看看持有锁的线程是否很快就会释放锁。**为了让线程等待，我们只须让线程执行一个忙循环（自旋），这项技术就是所谓的自旋锁**
+
+自旋锁在JDK 1.4.2中就已经引入，只不过默认是关闭的，可以使用-XX：+UseSpinning参数来开启，在JDK 6中就已经改为默认开启了。自旋等待不能代替阻塞，且先不说对处理器数量的要求，自旋等待本身虽然避免了线程切换的开销，但它是要占用处理器时间的，所以如果锁被占用的时间很短，自旋等待的效果就会非常好，反之如果锁被占用的时间很长，那么自旋的线程只会白白消耗处理器资源，而不会做任何有价值的工作，这就会带来性能的浪费。因此自旋等待的时间必须有一定的限度，如果自旋超过了限定的次数仍然没有成功获得锁，就应当使用传统的方式去挂起线程。自旋次数的默认值是十次，用户也可以使用参数-XX：PreBlockSpin来自行更改
+
+不过无论是默认值还是用户指定的自旋次数，对整个Java虚拟机中所有的锁来说都是相同的。在JDK 6中对自旋锁的优化，引入了自适应的自旋。自适应意味着自旋的时间不再是固定的了，而是由前一次在同一个锁上的自旋时间及锁的拥有者的状态来决定的。如果在同一个锁对象上，自旋等待刚刚成功获得过锁，并且持有锁的线程正在运行中，那么虚拟机就会认为这次自旋也很有可能再次成功，进而允许自旋等待持续相对更长的时间，比如持续100次忙循环。另一方面，如果对于某个锁，自旋很少成功获得过锁，那在以后要获取这个锁时将有可能直接省略掉自旋过程，以避免浪费处理器资源。有了自适应自旋，随着程序运行时间的增长及性能监控信息的不断完善，虚拟机对程序锁的状况预测就会越来越精准，虚拟机就会变得越来越“聪明”了
+
+
+
+1.自旋重试成功的情况：
+
+![9c4c](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/9c4c.png)
+
+2.`自旋重试失败的情况`，**自旋了一定次数还是没有等到 持锁的线程释放锁**, 线程2就会加入Monitor的阻塞队列(EntryList)
+
+![aef0](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/aef0.png)
+
+
+
+### 8、偏向锁 (用于优化轻量级锁重入)
+
+它的目的是消除数据在无竞争情况下的同步原语，进一步提高程序的运行性能。如果说轻量级锁是在**无竞争情况下**使用CAS操作，去消除同步使用的互斥量，那么偏向锁就是在无竞争的情况下把整个同步都消除掉，连CAS操作都不用去做了。
+
+这个锁会偏向于第一个获得它的线程，如果该锁一直没有被其他的线程获取，则持有偏向锁的线程将永远不需要再进行该同步。
+
+
+
+在`轻量级的锁`中，我们可以发现，如果同一个线程对同一个对象进行`重入锁`时，**也需要执行CAS替换操作，这是有点耗时。**
+
+那么JDK 6开始引入了`偏向锁`，将进入临界区的线程的ID, 直接设置给锁对象的Mark word, 下次该线程又获取锁, 发现线程ID是自己, 就不需要CAS操作了。
+
+- 升级为轻量级锁的情况 (会进行偏向锁撤销) : 获取偏向锁的时候, 发现线程ID不是自己的, 此时通过CAS替换操作, 操作成功了, 此时该线程就获得了锁对象。( 此时是交替访问临界区, 撤销偏向锁, 升级为轻量级锁)
+- 升级为重量级锁的情况 (会进行偏向锁撤销) : 获取偏向锁的时候, 发现线程ID不是自己的, 此时通过CAS替换操作, 操作失败了, 此时说明发生了锁竞争。( 此时是多线程访问临界区, 撤销偏向锁, 升级为重量级锁)
+
+偏向锁可以提高带有同步但无竞争的程序性能，但它同样是一个带有效益权衡性质的优化，也就是说它并非总是对程序运行有利。如果程序中大多数的锁都总是被多个不同的线程访问，那么偏向模式就是多余的(会撤销偏向锁),可以使用参数`-XX:-UseBiasedLocking`来禁止锁优化反而可以提升性能。
+
+
+
+![20210202174407252](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20210202174407252.png)
+
+![20210202174448323](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20210202174448323.png)
+
+
+
+---
+
+
+
+#### 8.1 偏向锁状态
+
+64 位虚拟机 ,普通对象的Mark Word结构如下:
+
+![bbc0](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/bbc0.png)
+
+- Normal：一般状态，没有加任何锁，前面62位保存的是对象的信息，最后2位为状态（01），倒数第三位表示是否使用偏向锁（未使用：0）
+
+- Biased：偏向状态，使用偏向锁，前面54位保存的当前线程的ID，最后2位为状态（01），倒数第三位表示是否使用偏向锁（使用：1）
+- Lightweight：使用轻量级锁，前62位保存的是锁记录的指针，最后2位为状态（00）
+- Heavyweight：使用重量级锁，前62位保存的是Monitor的地址指针，最后2位为状态(10)
+
+如果开启了偏向锁（默认开启），在创建对象时，对象的Mark Word后三位应该是101,但是偏向锁默认是**有延迟**的，不会再程序一启动就生效，而是会在程序运行一段时间（几秒之后），才会对创建的对象设置为偏向状态,如果没有开启偏向锁，对象的Mark Word后三位应该是001。
+
+
+
+#### 8.2 对象的创建后的Mark word
+
+如果开启了偏向锁（默认是开启的），那么对象刚创建之后，Mark Word 最后三位的值101，并且这是它的ThreadId，epoch，age(年龄计数器)都是0，在加锁的时候进行设置这些的值.
+
+偏向锁默认是延迟的，不会在程序启动的时候立刻生效，如果想避免延迟，可以添加虚拟机参数来禁用延迟：`-XX:BiasedLockingStartupDelay=0`来禁用延迟
+
+注意 : 处于偏向锁的对象解锁后，线程id仍存储于对象头中
+
+
+
+---
+
+这里会使用到一个工具类，其`ClassLayout.parseInstance(obj).toPrintable()`方法可以打印对象的对象头信息,其依赖如下:
 
 ```xml
 <dependency>
-  <groupId>org.mybatis</groupId>
-  <artifactId>mybatis</artifactId>
-  <version>3.5.4</version>
+    <groupId>org.openjdk.jol</groupId>
+    <artifactId>jol-core</artifactId>
+    <version>0.10</version>
 </dependency>
 ```
 
-- Github : https://github.com/mybatis/mybatis-3
-  - release (下载) : https://github.com/mybatis/mybatis-3/releases
-- 中文文档 : https://mybatis.org/mybatis-3/zh/index.html
-
-
-
-### 3、相关介绍
-
-- 持久化
-  - 数据持久化就是将程序的数据在瞬时状态转化为持久状态的过程
-  - 因为内存是**断电即失**的
-  - 实现持久化:数据库(Jdbc) , io文件
-- 持久层
-  - 完成持久化工作的代码块
-  - 它的层界限十分明显 (即基本用不到其他方面的知识)
-
-
-
-### 4、MyBatis的好处
-
-- 简单易学：本身就很小且简单。没有任何第三方依赖，最简单安装只要两个jar文件+配置几个sql映射文件易于学习，易于使用，通过文档和源代码，可以比较完全的掌握它的设计思路和实现。
-- 灵活：mybatis不会对应用程序或者数据库的现有设计强加任何影响。 sql写在xml里，便于统一管理和优化。通过sql语句可以满足操作数据库的所有需求。
-- 解除sql与程序代码的耦合：通过提供DAO层，将业务逻辑和数据访问逻辑分离，使系统的设计更清晰，更易维护，更易单元测试。sql和代码的分离，提高了可维护性。
-- 提供映射标签，支持对象与数据库的orm字段关系映射
-- 提供对象关系映射标签，支持对象关系组建维护
-- 提供xml标签，支持编写动态sql。
-
-
-
-## 二、MyBatis的使用
-
-### 1、数据库环境搭建
-
-```sql
-create database `mybatis`;
-
-use `mybatis`;
-
-drop table if exists `user`;
-create table `user`(
-  `id` int(20) not null AUTO_INCREMENT,
-  `name` varchar(30) default null,
-  `pwd` varchar(30) default null,
-  primary key(`id`)
-)engine=innodb default charset=utf8;
-
-insert into `user`(`id`,`name`,`pwd`) values
-(1,'等风',`123456`),
-(2,'小狗',`123456`),
-(3,'志神',`123456`)
-
-/* 编写代码时 注意区分  `code1`  'code2' */
-```
-
-
-
-### 2、创建IDEA项目 (父工程)
-
->一个父工程 (MyBatis)  删除 src 目录  在其下创建许多子模块
-
-- 新建一个普通的maven项目
-- 导入相关的maven依赖
-
-```xml
-<dependencies>
-  <!-- mysql驱动 -->
-  <dependency>
-    <groupId>mysql</groupId>
-    <artifactId>mysql-connector-java</artifactId>
-    <version>8.0.25</version>
-  </dependency>
-
-  <!-- MyBatis -->
-  <dependency>
-    <groupId>org.mybatis</groupId>
-    <artifactId>mybatis</artifactId>
-    <version>3.5.4</version>
-  </dependency>
-
-  <!-- junit -->
-  <dependency>
-    <groupId>junit</groupId>
-    <artifactId>junit</artifactId>
-    <version>4.12</version>
-    <scope>test</scope>
-  </dependency>
-  
-  <dependency>
-    <groupId>org.projectlombok</groupId>
-    <artifactId>lombok</artifactId>
-    <version>1.18.6</version>
-  </dependency>
-</dependencies>
-
-<!-- 资源过滤 是的src下的配置文件可以被加载出来 -->
-<build>
-  <resources>
-    <resource>
-      <directory>src/main/java</directory>
-      <includes>
-        <include>**/*.xml</include>
-        <include>**/*.properties</include>
-      </includes>
-    </resource>
-    <resource>
-      <directory>src/main/resources</directory>
-      <includes>
-        <include>*.xml</include>
-        <include>*.properties</include>
-      </includes>
-    </resource>
-  </resources>
-</build>
-```
-
-
-
-### 3、 MyBatis入门
-
->模块一： mybatis-01
-
-#### a. mybatis 核心配置文件
-
->XML 配置文件中包含了对 MyBatis 系统的核心设置，包括获取数据库连接实例的数据源（DataSource）以及决定事务作用域和控制方式的事务管理器（TransactionManager）。
-
-```xml
-<!-- mybatis-config.xml -->
-
-<?xml version="1.0" encoding="UTF-8" ?>
-<!DOCTYPE configuration
-        PUBLIC "-//mybatis.org//DTD Config 3.0//EN"
-        "http://mybatis.org/dtd/mybatis-3-config.dtd">
-
-<!-- configuration核心配置文件 -->
-<configuration>
-    <environments default="development">
-        <environment id="development">
-            <transactionManager type="JDBC"/>
-            <dataSource type="POOLED">
-                <property name="driver" value="com.mysql.cj.jdbc.Driver"/>
-                <property name="url" value="jdbc:mysql:///mybatis?useUnicode=true&amp;characterEncoding=UTF-8&amp;useSSL=FALSE&amp;serverTimezone=UTC"/>
-                <property name="username" value="root"/>
-                <property name="password" value="123456"/>
-            </dataSource>
-        </environment>
-    </environments>
-
-    <!-- 每一个Mapper.xml都需要在MyBatis核心配置文件中注册! -->
-    <mappers>
-      	<!--resource 资源路径 用 / -->
-        <mapper resource="com/ZHILIU/repository/UserMapper.xml"/>
-    </mappers>
-
-
-</configuration>
-```
-
-
-
-#### b. 编写工具类MyBatisUtils
-
->每个基于 MyBatis 的应用都是以一个 SqlSessionFactory 的实例为核心的。SqlSessionFactory 的实例可以通过 SqlSessionFactoryBuilder 获得。而 SqlSessionFactoryBuilder 则可以从 XML 配置文件或一个预先配置的 Configuration 实例来构建出 SqlSessionFactory 实例。
-
->有了 SqlSessionFactory，我们可以从中获得 SqlSession 的实例。SqlSession 提供了在数据库执行 SQL 命令所需的所有方法。可以通过 SqlSession 实例来直接执行已映射的 SQL 语句。
+但是我们所需要关注的就只是**对象头中Mark Word**,在这里，我根据`ClassLayout.parseInstance(obj).toPrintable()`方法打印某个类的对象,在其结果上做进一步处理，解析出Mark Word信息。具体的实现如下：
 
 ```java
-//SqlSessionFactory  -->  SqlSession
-public class MyBatisUtils {
+public class PrintMarkWord {
+    //根据toPrintable()的结果，一步步解析字符串，直到输出8bit的Mark Word
+    public static String print(Object obj){
+        String[] strs = ClassLayout.parseInstance(obj).toPrintable().split("                           ");
+        String[] strss = strs[2].split("\\(|\\)");
+        String[] strss1 = strs[3].split("\\(|\\)");
 
-    private static SqlSessionFactory sqlSessionFactory;
+        StringBuilder sb = new StringBuilder();
 
-    static {
-        String resource = "mybatis-config.xml";
-        try {
-            InputStream inputStream = Resources.getResourceAsStream(resource);
-            sqlSessionFactory = new SqlSessionFactoryBuilder().build(inputStream);
-        } catch (IOException e) {
-            e.printStackTrace();
+        String[] strsss1 = strss1[1].split(" ");
+        for(int i=3 ; i>=0 ;i--) {
+            sb.append(strsss1[i]);
+            sb.append(" ");
         }
-    }
 
-    public static SqlSession getSqlSession(){
-        return sqlSessionFactory.openSession();
-    }
-
-}
-```
-
-#### c. 实体类User
-
-```java
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-public class User {
-    private long id;
-    private String name;
-    private String pwd;
-}
-```
-
-#### d. UserRepository
-
->接口repository中定义 实体类与对应数据库表 中的业务规范
-
-```java
-public interface UserRepository {
-    List<User> getUserList();
-}
-```
-
-#### e. UserMapper.xml
-
->对接repository 映射SQL语句
-
-```xml
-<?xml version="1.0" encoding="UTF-8" ?>
-<!DOCTYPE mapper
-        PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
-        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-
-<!-- namespace=绑定一个对应的repository/Dao/Mapper接口 -->
-<mapper namespace="com.ZHILIU.repository.UserRepository">
-  
-  	<!-- id 绑定repository 中的方法 -->
-    <!-- resultType 为返回实体类的全类名-->
-    <select id="getUserList" resultType="com.ZHILIU.entity.User">
-        select * from user
-    </select>
-  
-</mapper>
-```
-
-#### f. 测试
-
-```java
-@Test
-    public void test1(){
-        //1.获取sqlSession对象
-        SqlSession sqlSession = MyBatisUtils.getSqlSession();
-
-        //2.获取MaBatis实例化的repository接口对象
-        UserRepository userRepository = sqlSession.getMapper(UserRepository.class);
-        //3.映射器实例 执行
-        List<User> userList = userRepository.getUserList();
-
-//        List<Object> objects = sqlSession.selectList("com.ZHILIU.repository.UserRepository.getUserList");
-//        List<User> userList = sqlSession.selectList("com.ZHILIU.repository.UserRepository.getUserList");
-
-        System.out.println(userList);
-        
-        //4.关闭SqlSession
-        sqlSession.close();
-
-    }
-```
-
-
-
-> **注意**：1.Mapper不注册 抛异常:org.apache.ibatis.binding.BindingException: Type interface com.ZHILIU.repository.UserRepository is not known to the MapperRegistry.
->
-> 2.异常 : Could not find resource com/ZHILIU/repository/UserMapper.xml  是资源过滤问题，IDEA没有加载src下的xml文件，要在pom.xml <build></bulid> 中添加相关配置。
-
-```xml
-<resources>
-  <resource>
-    <directory>src/main/java</directory>
-    <includes>
-      <include>**/*.xml</include>
-      <include>**/*.properties</include>
-    </includes>
-  </resource>
-  <resource>
-    <directory>src/main/resources</directory>
-    <includes>
-      <include>*.xml</include>
-      <include>*.properties</include>
-    </includes>
-  </resource>
-</resources>
-```
-
-#### g. 总结
-
-- mybatis-config.xml 核心配置文件 配置核心设置 以及 注册Mapper
-- User实体类 与数据库中表对应
-- UserRepository/UserMapper 接口定义与数据库交互时的规范 (映射语句)。
-- UserMapper.xml中绑定UserMapper接口 及 用标签与Mapper中的映射语句绑定并实现sql
-- MyBatisUtils 中获取 SqlSession
-
-##### SqlSessionFactoryBuilder
-
- 	这个类可以被实例化、使用和丢弃，一旦创建了 SqlSessionFactory，就不再需要它了。 因此 SqlSessionFactoryBuilder 实例的最佳作用域是方法作用域（也就是局部方法变量）。
-
-##### SqlSessionFactory
-
-​	SqlSessionFactory 一旦被创建就应该在应用的运行期间一直存在，不要重复创建多次。因此 SqlSessionFactory 的最佳作用域是应用作用域。最简单的就是使用**单例模式**或者**静态单例模式**。
-
-##### SqlSession
-
-​	每个线程都应该有它自己的 SqlSession 实例。SqlSession 的实例不是线程安全的，因此是不能被共享。**每次收到 HTTP 请求，就可以打开一个 SqlSession，返回一个响应后，就关闭它。** 这个关闭操作很重要，为了确保每次都能执行关闭操作，你应该把这个关闭操作放到 finally 块中。 下面的示例就是一个确保 SqlSession 关闭的标准模式：
-
-```java
-try (SqlSession session = sqlSessionFactory.openSession()) {
-  // 你的应用逻辑代码
-}
-```
-
-#### h. 理解
-
-SqlSessionFactoryBulider.bulid(InputStream ins)  --->  SqlSessionFactory
-
-SqlSessionFactory.openSession  ---> SqlSession
-
-SqlSession.getMapper(Repository.class)  --> userMapper (映射器实例)
-
-映射器是一些绑定映射语句的接口。映射器接口的实例是从 SqlSession 中获得的。
-
-在Mapper.xml中绑定映射器，并且在核心配置文件中注册Mapper就可以通过SqlSeeion.getMapper(Repository.class)获取接口的实现类 (映射器实例)。
-
-获得了 映射器实例 就可以直接调用该接口实例中的方法与数据库进行交互。
-
-
-
-## 三、CRUD操作
-
-UserMapper.xml
-
-```java
-public interface UserRepository {
-    //获取全部用户
-    List<User> getUserList();
-
-    //按照id查询用户
-    User getUserById(long id);
-
-    //添加一个用户
-    int addUser(User user);
-
-    //修改用户
-    int updateUser(User user);
-
-    //删除用户
-    int deleteById(long id);
-}
-```
-
-
-
-#### 1、select   查询语句
-
-```xml
-<select id="getUserList" resultType="com.ZHILIU.entity.User">
-  select * from user;
-</select>
-
-<select id="getUserById" parameterType="long" resultType="com.ZHILIU.entity.User">
-  select * from user where id = #{id};
-</select>
-```
-
-#### 2、insert  添加语句
-
-```xml
-<!-- insert update delete 返回值都是int类型  就不用写-->
-<insert id="addUser" parameterType="com.ZHILIU.entity.User">
-  insert into user(id,name,pwd) values(#{id},#{name},#{pwd});
-</insert>
-```
-
-#### 3、update 修改语句
-
-```xml
-<update id="updateUser" parameterType="com.ZHILIU.entity.User">
-  update user set name = #{name}, pwd = #{pwd} where id = #{id};
-</update>
-```
-
-#### 4、delete  删除语句
-
-```xml
-<delete id="deleteById" parameterType="long" >
-  delete from user where id = #{id};
-</delete>
-```
-
-
-
-**.xml中属性**:
-
-- namespace中绑定Mapper接口，即要与接口名相同!
-
-
-- id : 为绑定接口中的方法名。
-- resultType ：SQL语句的返回值。
-
->insert update delete 返回值都是int类型  就不用写
-
-- parameterType : 为参数类型。 **单个参数不写也可以自动映射**
-
-
-
-**注意** : 增删改需要提交事务 sqlSession.commit();
-
-
-
-#### 5、"万能Map"
-
->Map 的 别名为 map ,  paramType="map"
-
-假如，我们实体类或者数据库中表、字段、或者参数过多，我们可以考虑使用map
-
-```java
-//万能Map
-int addUser1(Map<String,Object> map);
-
-//万能Map
-int updateUser1(Map<String,Object> map);
-```
-
-```xml
-<!-- 用map传递key -->
-<insert id="addUser1" parameterType="map">
-  insert into user (id, name)
-  values (#{userId},#{userName});
-</insert>
-
-<update id="updateUser1" parameterType="map">
-  update user set name = #{userName} where id = #{userId};
-</update>
-```
-
-```java
-Map<String, Object> map = new HashMap<>();
-map.put("userId",5);
-map.put("userName","GodZii");
-
-System.out.println(userMapper.addUser1(map));
-System.out.println(userMapper.updateUser1(map));
-```
-
-Map传递参数，直接在sql中取出key值。
-
-对象传递参数，直接在sql中取出对象的属性。
-
-只有一个基本类型参数的情况下，直接在sql中取到，或者可以省略paramType。
-
-多个参数就用Map，或者注解。
-
-
-
-#### 6、模糊查询
-
-```java
-//模糊查询
-List<User> getUserLike(String value);
-```
-
-```xml
-<!-- 模糊查询  -->
-<select id="getUserLike" parameterType="String" resultType="com.ZHILIU.entity.User">
-select * from user where name like "%"#{value}"%";
-</select>
-```
-
-```java
-System.out.println(userMapper.getUserLike("小"));
-```
-
-- 可以再java代码执行的时候，就加上通配符 "%小%" 。
-- 也可以在sql拼接中使用通配符 "%"#{value}"%" .
-
->思考防止sql注入!
-
-
-
-## 四、XML配置解析
-
->模块二： mybatis-02
-
-### 1、核心配置文件(mybatis-config.xml)
-
-MyBatis 的配置文件包含了会深深影响 MyBatis 行为的设置和属性信息。
-
-配置文档的顶层结构如下：
-
-- configuration（配置）
-
-  - **properties（属性）**
-  - settings（设置）
-  - **typeAliases（类型别名）**
-  - typeHandlers（类型处理器）
-  - objectFactory（对象工厂）
-  - plugins（插件）
-  - environments（环境配置）
-
-    - environment（环境变量）
-      - transactionManager（事务管理器）
-      - dataSource（数据源）
-  - databaseIdProvider（数据库厂商标识）
-  - mappers（映射器）
-
-
-
-### 2、环境配置(environments)
-
-MyBatis 可以配置成适应多种环境。
-
-不过要记住：尽管可以配置多个环境，但每个 SqlSessionFactory 实例只能选择一种环境。
-
-在 <environments default="default"> 中选择默认环境。
-
-MyBatis 默认的事务管理器是JDBC ( 知道有个MANAGED)。
-
-数据源默认是连接池 POOLED  (有个UNPOOLED、JNDI)。
-
-### 3、属性(properties)
-
-可以通过properties属性来实现引用配置文件
-
-这些属性可以在外部进行配置，并可以进行动态替换。既可以在典型的 Java 属性文件【.properties】中配置这些属性，也可以在 properties 元素的子元素中设置。
-
->db.properties
-
-```properties
-driver=com.mysql.cj.jdbc.Driver
-url=jdbc:mysql:///mybatis?useUnicode=true&characterEncoding=UTF8&useSSL=FALSE&serverTimezone=UTC
-username=root
-password=123456
-```
-
-> 在 mybatis-config.xml 中属性的顺序
->
-> The content of element type "configuration" must match "(properties?,settings?,typeAliases?,typeHandlers?,objectFactory?,objectWrapperFactory?,reflectorFactory?,plugins?,environments?,databaseIdProvider?,mappers?)".
-
-mybatis-config.xml
-
-```xml
-<!--  引入外部配置文件  -->
-<properties resource="db.properties">
-
-</properties>
-
-<environments default="development">
-  <environment id="development">
-    <transactionManager type="JDBC"/>
-    <dataSource type="POOLED">
-      <property name="driver" value="${driver}"/>
-      <property name="url" value="${url}"/>
-      <property name="username" value="${username}"/>
-      <property name="password" value="${password}"/>
-    </dataSource>
-  </environment>
-</environments>
-```
-
-- 可以直接引入外部文件
-- 可以再其中增加一些属性配置
-- 如果有标签中的属性与配置文件中的属性字段相同，则外部配置文件优先
-
-
-
-### 4、类型别名 (typeAlianses)
-
-类型别名可为 Java 类型设置一个缩写名字，降低冗余的全限定类名书写。
-
-```xml
-<!--可以给实体类起别名-->
-<typeAliases>
-  <typeAlias type="com.ZHILIU.entity.User" alias="User"/>
-</typeAliases>
-```
-
-可也以指定一个包名，MyBatis会在包名下面搜索需要的Java Bean
-
-这些实体类的默认别名就是这个类的类名，首字母小写。若有注解，则别名为其注解值。
-
-```xml
-<typeAliases>
-  <package name="com.ZHILIU.entity"/>
-</typeAliases>
-```
-
-通过注解起别名 (扫描包)
-
-```java
-@Alias("User")
-public class User{
-  //
-}
-```
-
-> Java 类型内建的类型别名
->
-> https://mybatis.org/mybatis-3/zh/configuration.html#typeAliases
-
-
-
-###5、设置（settings）
-
->https://mybatis.org/mybatis-3/zh/configuration.html#settings
-
-- cacheEnabled
-- lazyLoadingEnabled
-- logImpl
-
-
-
-### 6、其他配置 (*了解)
-
-- typeHandlers（类型处理器）
-- objectFactory（对象工厂）
-- plugins（插件）
-  - mybatis-generator-core
-  - mybatis-plus
-  - 通用mapper
-
-
-
-### 7、映射器 (mappers)
-
-MapperRegistry：注册绑定Mapper文件；
-
-**方式一**：
-
-```xml
-<mappers>
-    <mapper resource="com/ZHILIU/repository/UserMapper.xml"/>
-</mappers>
-```
-
-方式二：使用class文件绑定注册
-
-```xml
-<mappers>
-  <mapper class="com.ZHILIU.repository.UserMapper"/>
-</mappers>
-```
-
-方式三：使用扫描包进行注入绑定
-
-```xml
-<mappers>
-  <package name="com.ZHILIU.repository"/>
-</mappers>
-```
-
-
-
-注意：(方式二和方式三)
-
-- 接口和它的Mapper配置文件必须同名。
-- 接口和它的Mapper配置文件必须在同一个包下。
-
-
-
-
-
-## 五、初识ResultMap
-
-> 模块三：mabatis-03
-
-> https://mybatis.org/mybatis-3/zh/sqlmap-xml.html#Result_Maps
-
-
-
-#### 实体类属性名 和 数据库表字段名不一致
-
-User
-
-```java
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-public class User {
-    private long id;
-    private String name;
-    private String password;
-}
-```
-
-数据库 User表中字段  id , name ,pwd
-
-查询结果   :    User ( id=1, name=等风, password=null )
-
-
-
-解决方法：
-
-- 起别名
-
-```xml
-<select id="getUserById" parameterType="long" resultType="com.ZHILIU.entity.User">
-  select id,name,pwd as password from user where id = #{id};
-</select>
-```
-
-- **使用ResultMap**
-
-```xml
-<!-- 结果集映射 -->
-<resultMap id="userMap" type="User">
-  <!-- column为数据库表中的字段 property为实体类中的属性 -->
-  		<!-- 相同不需要映射 -->
-  <!--        <result column="id" property="id"/>-->
-  <!--        <result column="name" property="name"/>-->
-  <result column="pwd" property="password"/>
-</resultMap>
-
-<select id="getUserById" resultMap="userMap">
-  select * from user where id = #{id};
-</select>
-```
-
-
-
-如果这个世界总是这么简单就好了......
-
-
-
-## 六、日志
-
-如果一个数据库操作，出现了异常，我们需要排错。日志就是最好的助手！
-
-sout 、debug
-
-现在可以用 日志工厂 ！
-
-**logImpl** ：指定 MyBatis 所用日志的具体实现，未指定时将自动查找。
-
-- SLF4J
-- **LOG4J(deprecated since 3.5.9)**
-- LOG4J2
-- JDK_LOGGING
-- COMMONS_LOGGING
-- **STDOUT_LOGGING**
-- NO_LOGGING
-
-
-
-在MyBatis中具体使用哪个日志实现，在设置中设定。
-
-
-
-### 6.1、日志工厂
-
->模块四：mybatis-04
-
-**STDOUT_LOGGING**
-
-```xml
-<settings>
-  <!-- 标准的日志工厂实现  -->
-  <setting name="logImpl" value="STDOUT_LOGGING"/>
-</settings>
-```
-
-sout
-
-```tex
-Opening JDBC Connection
-Created connection 599984672.
-Setting autocommit to false on JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@23c30a20]
-==>  Preparing: select * from user where id = ?; 
-==> Parameters: 1(Long)
-<==    Columns: id, name, pwd
-<==        Row: 1, 等风, 123456
-<==      Total: 1
-User(id=1, name=等风, pwd=123456)
-Resetting autocommit to true on JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@23c30a20]
-Closing JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@23c30a20]
-Returned connection 599984672 to pool.
-```
-
-
-
-### 6.2、Log4j
-
-- Log4j是Apache的一个开源项目，通过使用Log4j，我们可以控制日志信息输送的目的地是控制台、文件、GUI组件。
-- 我们也可以控制每一条日志的输出格式。
-- 通过定义每一条日志信息的级别，我们能够更加细致地控制日志的生成过程。
-- 可以通过一个配置文件来灵活地进行配置，而不需要修改应用的代码。
-
-
-
-1.导入maven依赖
-
-```xml
-<!-- https://mvnrepository.com/artifact/log4j/log4j -->
-<dependency>
-    <groupId>log4j</groupId>
-    <artifactId>log4j</artifactId>
-    <version>1.2.17</version>
-</dependency>
-```
-
-2.log4j.propertis
-
-```properties
-# 将等级为DEBUG的日执信息输出到console和file，console和file的定义在下
-log4j.rootLogger=debug,console ,file
-
-# 控制台输出相关配置
-log4j.appender.console=org.apache.log4j.ConsoleAppender
-log4j.appender.console.Target=System.out
-log4j.appender.console.Threshold=DEBUG
-log4j.appender.console.layout=org.apache.log4j.PatternLayout
-log4j.appender.console.layout.ConversionPattern=[%c]-%m%n
-
-# 文件输出相关配置
-log4j.appender.file=org.apache.log4j.FileAppender
-log4j.appender.file.File=./logs/ZHILIU.log
-log4j.appender.file.Append=true
-#log4j.appender.file.MaxFileSize=1mb
-log4j.appender.file.Threshold=DEBUG
-log4j.appender.file.layout=org.apache.log4j.PatternLayout
-log4j.appender.file.layout.ConversionPattern=[ %p ] %-d{yyyy-MM-dd HH:mm:ss} [ %t ] - %m%n
-
-# 日志输出级别
-log4j.logger.org.apache=DEBUG
-log4j.logger.java.sql=DEBUG
-log4j.logger.java.sql.Connection=DEBUG
-log4j.logger.java.sql.Statement=DEBUG
-log4j.logger.java.sql.PreparedStatement=DEBUG
-log4j.logger.java.sql.ResultSet=DEBUG
-```
-
-3.mybatis-config.xml
-
-```xml
-<settings>
-  <!-- 标准的日志工厂实现  -->
-  <!--        <setting name="logImpl" value="STDOUT_LOGGING"/>-->
-  <setting name="logImpl" value="LOG4J"/>
-</settings>
-```
-
-4.测试 sout
-
-```tex
-[org.apache.ibatis.logging.LogFactory]-Logging initialized using 'class org.apache.ibatis.logging.log4j.Log4jImpl' adapter.
-[org.apache.ibatis.logging.LogFactory]-Logging initialized using 'class org.apache.ibatis.logging.log4j.Log4jImpl' adapter.
-[org.apache.ibatis.datasource.pooled.PooledDataSource]-PooledDataSource forcefully closed/removed all connections.
-[org.apache.ibatis.datasource.pooled.PooledDataSource]-PooledDataSource forcefully closed/removed all connections.
-[org.apache.ibatis.datasource.pooled.PooledDataSource]-PooledDataSource forcefully closed/removed all connections.
-[org.apache.ibatis.datasource.pooled.PooledDataSource]-PooledDataSource forcefully closed/removed all connections.
-[org.apache.ibatis.transaction.jdbc.JdbcTransaction]-Opening JDBC Connection
-[org.apache.ibatis.datasource.pooled.PooledDataSource]-Created connection 589273327.
-[org.apache.ibatis.transaction.jdbc.JdbcTransaction]-Setting autocommit to false on JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@231f98ef]
-[com.ZHILIU.repository.UserMapper.getUserById]-==>  Preparing: select * from user where id = ?; 
-[com.ZHILIU.repository.UserMapper.getUserById]-==> Parameters: 1(Long)
-[com.ZHILIU.repository.UserMapper.getUserById]-<==      Total: 1
-User(id=1, name=等风, pwd=123456)
-[org.apache.ibatis.transaction.jdbc.JdbcTransaction]-Resetting autocommit to true on JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@231f98ef]
-[org.apache.ibatis.transaction.jdbc.JdbcTransaction]-Closing JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@231f98ef]
-[org.apache.ibatis.datasource.pooled.PooledDataSource]-Returned connection 589273327 to pool.
-```
-
-5.log4j 日志文件 .txt
-
-```tex
-[ DEBUG ] 2022-01-12 11:47:53 [ main ] - Logging initialized using 'class org.apache.ibatis.logging.log4j.Log4jImpl' adapter.
-[ DEBUG ] 2022-01-12 11:47:53 [ main ] - Logging initialized using 'class org.apache.ibatis.logging.log4j.Log4jImpl' adapter.
-[ DEBUG ] 2022-01-12 11:47:53 [ main ] - PooledDataSource forcefully closed/removed all connections.
-[ DEBUG ] 2022-01-12 11:47:53 [ main ] - PooledDataSource forcefully closed/removed all connections.
-[ DEBUG ] 2022-01-12 11:47:53 [ main ] - PooledDataSource forcefully closed/removed all connections.
-[ DEBUG ] 2022-01-12 11:47:53 [ main ] - PooledDataSource forcefully closed/removed all connections.
-[ DEBUG ] 2022-01-12 11:47:53 [ main ] - Opening JDBC Connection
-[ DEBUG ] 2022-01-12 11:47:54 [ main ] - Created connection 87060781.
-[ DEBUG ] 2022-01-12 11:47:54 [ main ] - Setting autocommit to false on JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@530712d]
-[ DEBUG ] 2022-01-12 11:47:54 [ main ] - ==>  Preparing: select * from user where id = ?; 
-[ DEBUG ] 2022-01-12 11:47:54 [ main ] - ==> Parameters: 1(Long)
-[ DEBUG ] 2022-01-12 11:47:54 [ main ] - <==      Total: 1
-[ DEBUG ] 2022-01-12 11:47:54 [ main ] - Resetting autocommit to true on JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@530712d]
-[ DEBUG ] 2022-01-12 11:47:54 [ main ] - Closing JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@530712d]
-[ DEBUG ] 2022-01-12 11:47:54 [ main ] - Returned connection 87060781 to pool.
-```
-
-
-
-**简单使用：**
-
-Test.java
-
-```java
-import org.apache.log4j.Logger;
-
-public class UserMapperTest {
-
-    static Logger logger = Logger.getLogger(UserMapperTest.class);
-
-    @Test
-    public void testLog4j(){
-        //日志级别
-        logger.info("info : testLog4j()...");
-        logger.debug("debug : testLog4j()...");
-        logger.error("error : testLog4j()...");
-    }
-}
-```
-
-console.sout
-
-```tex
-[com.ZHILIU.repository.UserMapperTest]-info : testLog4j()...
-[com.ZHILIU.repository.UserMapperTest]-debug : testLog4j()...
-[com.ZHILIU.repository.UserMapperTest]-error : testLog4j()...
-```
-
-日志文件.log
-
-```tex
-[ INFO ] 2022-01-12 11:56:40 [ main ] - info : testLog4j()...
-[ DEBUG ] 2022-01-12 11:56:40 [ main ] - debug : testLog4j()...
-[ ERROR ] 2022-01-12 11:56:40 [ main ] - error : testLog4j()...
-```
-
-
-
-## 七、分页
-
-分页是为了减少数据的处理量
-
-### 使用Limit分页
-
-语法：select * from user limit  startIndex , pageSize;
-
-1.UserMap
-
-```java
-//分页
-List<User> getUserLimit(Map<String,Integer> map);
-```
-
-2.UserMapper.xml
-
-```xml
-<select id="getUserLimit" resultType="User" parameterType="map">
-  select * from user limit #{startIndex},#{pageSize};
-</select>
-```
-
-3.@Test
-
-```java
-@Test
-public void testLimit(){
-  SqlSession sqlSession = MyBatisUtils.getSqlSession();
-  UserMapper userMapper = sqlSession.getMapper(UserMapper.class);
-  
-  Map<String,Integer> map = new HashMap<>();
-  map.put("startIndex",1);
-  map.put("pageSize",3);
-  
-  List<User> userLis = userMapper.getUserLimit(map);
-  System.out.println(userLis);
-
-  sqlSession.close();
-}
-```
-
-
-
-### 使用RowBounds实现（*了解）
-
-UserMapper
-
-```java
-//分页rowBounds
-List<User> getUserByRowBounds();
-```
-
-UserMapper.xml
-
-```xml
-<select id="getUserByRowBounds" resultType="User">
-  select * from user;
-</select>
-```
-
-@Test
-
-```java
-@Test
-public void testRowBounds(){
-  SqlSession sqlSession = MyBatisUtils.getSqlSession();
-  UserMapper userMapper = sqlSession.getMapper(UserMapper.class);
-
-  RowBounds rowBounds = new RowBounds(1,3);
-  List<User> userList = sqlSession.selectList("com.ZHILIU.repository.UserMapper.getUserByRowBounds", null, rowBounds);
-  System.out.println(userList);
-
-  sqlSession.close();
-
-}
-```
-
-
-
-### MyBatis 分页插件 PageHelper（*了解）
-
-
-
-## 八、注解开发
-
-> 模块五：mybatis-05
-
-​	使用注解来映射简单语句会使代码显得更加简洁，并且不需要Mapper.xml，但对于稍微复杂一点的语句，Java 注解不仅力不从心，还会让你本就复杂的 SQL 语句更加混乱不堪。 因此，如果你需要做一些很复杂的操作，最好用 XML 来映射语句。
-
-
-
-- 可以再工具类创建的时候实现自动提交事务
-
-```java
-public class MyBatisUtils {
-
-    private static SqlSessionFactory sqlSessionFactory;
-
-    static {
-        String resource = "mybatis-config.xml";
-        try {
-            InputStream inputStream = Resources.getResourceAsStream(resource);
-            sqlSessionFactory = new SqlSessionFactoryBuilder().build(inputStream);
-        } catch (IOException e) {
-            e.printStackTrace();
+        String[] strsss = strss[1].split(" ");
+        for(int i=3 ; i>=0 ;i--) {
+            sb.append(strsss[i]);
+            sb.append(" ");
         }
+        return sb.toString();
+    }
+}
+```
+
+
+
+---
+
+
+
+**测试**：一个对象创建后，加锁前后 对象头中Mark Word信息，并测试上述工具类正确性：
+
+```java
+/**
+ * -XX:BiasedLockingStartupDelay=0 关闭偏向锁延迟
+ */
+@Slf4j()
+public class Test1 {
+
+    public static void main(String[] args) {
+        Dog d = new Dog();
+        new Thread(()->{
+            System.out.println("synchronized 前 ----- ");
+            log.debug(PrintMarkWord.print(d));
+            synchronized (d){
+                System.out.println("synchronized 中 ----- ");
+                log.debug(PrintMarkWord.print(d));
+                System.out.println("对象头中信息 ----- ");
+                System.out.println(ClassLayout.parseInstance(d).toPrintable());
+            }
+            System.out.println("synchronized 后 ----- ");
+            log.debug(PrintMarkWord.print(d));
+        },"t1").start();
     }
 
-    public static SqlSession getSqlSession(){
-      	//实现自动提交事务
-        return sqlSessionFactory.openSession(true);
-    }
-
 }
-```
 
-
-
-UserMapper
-
-```java
-public interface UserMapper {
-
-  @Select("select * from user")
-  List<User> getUserList();
-
-  //一个参数@param可以省略,建议加上
-  @Select("select * from user where id = #{uid}")
-  User getUserById(@Param("uid") long id);
-
-  //方法存在多个基本类型的参数 **必须** 加上 @param 注解
-  @Select("select * from user where id = #{id} and name = #{name}")
-  User getUser(@Param("id") long id,@Param("name") String name);
-
-  @Insert("insert into user(id,name,pwd) value(#{id},#{name},#{pwd})")
-  int addUser(User user);
-
-  @Update("update user set name=#{name},pwd=#{pwd} where id = #{id}")
-  int updateUser(User user);
-
-  @Delete("delete from user where id = #{id}")
-  int deleteUser(long id);
-
-}
-```
-
-Test
-
-```java
-@Test
-public void test(){
-  SqlSession sqlSession = MyBatisUtils.getSqlSession();
-
-  UserMapper userMapper = sqlSession.getMapper(UserMapper.class);
-
-  //        System.out.println(userMapper.getUserList());
-
-  //        System.out.println(userMapper.getUserById(1L));
-
-  //        System.out.println(userMapper.getUser(1L,"等风"));
-
-  //        userMapper.addUser(new User(7,"小志","191919"));
-
-  //        System.out.println(userMapper.updateUser(new User(7, "小智", "191919")));
-
-  System.out.println(userMapper.deleteUser(7L));
-
-  sqlSession.close();
-}
-```
-
-
-
-一定要将接口注册到mybatis-config.xml中
-
-```xml
-<mappers>
-  <mapper class="com.ZHILIU.repository.UserMapper"/>
-</mappers>
-```
-
-
-
-## 九、复杂条件查询
-
->模块六：mybatis-06
-
-### 9.1、数据库环境搭建
-
-```sql
-drop table if exists `teacher`;
-CREATE TABLE `teacher` (
-  `id` INT(10) NOT NULL,
-  `name` VARCHAR(30) DEFAULT NULL,
-  PRIMARY KEY (`id`)
-) ENGINE=INNODB DEFAULT CHARSET=utf8;
-
-INSERT INTO teacher(`id`, `name`) VALUES (1, '秦老师'); 
-
-drop table if exists `student`;
-CREATE TABLE `student` (
-  `id` INT(10) NOT NULL,
-  `name` VARCHAR(30) DEFAULT NULL,
-  `tid` INT(10) DEFAULT NULL,
-  PRIMARY KEY (`id`),
-  KEY `fktid` (`tid`),
-  CONSTRAINT `fktid` FOREIGN KEY (`tid`) REFERENCES `teacher` (`id`)
-) ENGINE=INNODB DEFAULT CHARSET=utf8;
-
-
-INSERT INTO `student` (`id`, `name`, `tid`) VALUES ('1', '小明', '1'); 
-INSERT INTO `student` (`id`, `name`, `tid`) VALUES ('2', '小红', '1'); 
-INSERT INTO `student` (`id`, `name`, `tid`) VALUES ('3', '小张', '1'); 
-INSERT INTO `student` (`id`, `name`, `tid`) VALUES ('4', '小李', '1'); 
-INSERT INTO `student` (`id`, `name`, `tid`) VALUES ('5', '小王', '1');
-```
-
-### 9.2、IDEA项目中环境
-
-1.实体类 Student，Teacher
-
-```java
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-public class Student {
-    private long id;
-    private String name;
-    //学生tid(外键)关联老师主键id
-    private Teacher teacher;
-}
-```
-
-```java
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-public class Teacher {
-    private long id;
-    private String name;
-    //老师对应多个学生
-    private List<Student> students;
-}
-```
-
-2.Mapper接口 StudentMapper，TeacherMapper
-
-3.xml映射文件 StudentMapper.xml，TeacherMapper.xml
-
-4.mybatis-config.xml  ,  db.properties
-
-```xml
-<?xml version="1.0" encoding="UTF-8" ?>
-<!DOCTYPE configuration
-        PUBLIC "-//mybatis.org//DTD Config 3.0//EN"
-        "http://mybatis.org/dtd/mybatis-3-config.dtd">
-
-<configuration>
-
-    <properties resource="db.properties"/>
+Class Dog{
     
-    <settings>
-        <setting name="logImpl" value="STDOUT_LOGGING"/>
-    </settings>
-
-    <typeAliases>
-        <package name="com.ZHILIU.entity"/>
-    </typeAliases>
-
-    <environments default="development">
-        <environment id="development">
-            <transactionManager type="JDBC"/>
-            <dataSource type="POOLED">
-                <property name="driver" value="${driver}"/>
-                <property name="url" value="${url}"/>
-                <property name="username" value="${username}"/>
-                <property name="password" value="${password}"/>
-            </dataSource>
-        </environment>
-    </environments>
-
-    <mappers>
-        <package name="com.ZHILIU.repository"/>
-    </mappers>
-
-</configuration>
-```
-
-
-
-### 9.3、多对一查询案例
-
---- 查询所有学生的信息，以及对应老师的信息
-
-```java
-public interface StudentMapper {
-    //查询所有学生的信息，以及对应老师的信息
-    public List<Student> getStudentList1();
-
-    //查询所有学生的信息，以及对应老师的信息
-    public List<Student> getStudentList2();
 }
 ```
 
+![WM-Screenshots-20220427223857](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/WM-Screenshots-20220427223857.png)
+
+可以看到，初始状态是可偏向的，一个线程获取偏向锁，锁对象的Mark Word中会记录线程ID，处于偏向锁的对象解锁后，线程ID仍存储于对象头中；其次比较两个输出结果，可以看到解析无误。
 
 
-#### A.按照结果嵌套处理
 
->联表查询
+**测试禁用偏向锁**：如果没有开启偏向锁，那么对象创建后最后三位的值为001，为无锁状态，这时候它的hashcode，age都为0，hashcode是第一次用到hashcode时才赋值的。在上面测试代码运行时在添加 VM 参数`-XX:-UseBiasedLocking`禁用偏向锁（禁用偏向锁则优先使用轻量级锁），退出synchronized状态变回 `001`
 
-```xml
-<select id="getStudentList1" resultMap="studentList1">
-  select s.id as sid,s.name as sname,t.id as tid,t.name as tname
-  from student s,teacher t
-  where s.tid = t.id;
-</select>
-<resultMap id="studentList1" type="Student">
-  <!-- id是主键 也可换成result标签-->
-  <id column="sid" property="id"/>
-  <!-- column是查询结果中的列名,property是Java Bean中属性  -->
-  <result column="sname" property="name"/>
-  <!-- 复杂的属性，对象用association 集合用collection
-             javaType="" 指定属性的类型
-             ofType="" 集合中的泛型信息     -->
-  <association property="teacher" javaType="Teacher">
-    <id column="tid" property="id"/>
-    <result column="tname" property="name"/>
-  </association>
-</resultMap>
-```
+- 禁止偏向锁, 虚拟机参数`-XX:-UseBiasedLocking`; 优先使用轻量级锁
+- 输出结果: 最开始状态为001，然后加轻量级锁变成00，最后恢复成001
 
-@Test
+![20201219231656738](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/20201219231656738.png)
+
+
+
+#### 8.3 撤销偏向锁-HashCode()
+
+当对象进入偏向状态的时候，Mark Word大部分的空间(23个比特）都用于存储持有锁的线程ID了,这部分空间占用了原有存储对象哈希码的位置,那原来对象的哈希码怎么办呢?
+
+在Java语言里面一个对象如果计算过哈希码，就应该一直保持该值不变，否则很多依赖对象哈希码的API都可能存在出错风险。而作为绝大多数对象哈希码来源的Object:.hashCode()方法，返回的是对象的一致性哈希码（Identity Hash Code)，这个值是能强制保证不变的,它通过在对象头中存储计算结果来保证第一次计算之后,再次调用该方法取到的哈希码值永远不会再发生改变。**因此,当一个对象已经计算过一致性哈希码后,它就再也无法进入偏向锁状态了 ; 而当一个对象当前正处于偏向锁状态，又收到需要计算其一致性哈希码请求时,它的偏向状态会被立即撤销,并且锁会膨胀为重量级锁。**在重量级锁的实现中,对象头指向了重量级锁的位置,代表重量级锁的ObjectMonitor类里有字段可以记录非加锁状态(标志位为“01”)下的 Mark Word,其中自然可以存储原来的哈希码。
+
+---
+
+测试：
 
 ```java
-@Test
-public void testStudentMapper(){
-  //已经设置自动提交事务
-  SqlSession sqlSession = MyBatisUtils.getSqlSession();
+/**
+ * -XX:BiasedLockingStartupDelay=0
+ */
+@Slf4j
+public class Test4 {
+    public static void main(String[] args) {
+        Dog d = new Dog();
+        new Thread(()->{
+            log.debug(PrintMarkWord.print(d));
+            synchronized (d){
+                log.debug(PrintMarkWord.print(d));
+            }
 
-  StudentMapper mapper = sqlSession.getMapper(StudentMapper.class);
+            System.out.println(d.hashCode()); //计算其一致性哈希码
 
-  List<Student> studentList = mapper.getStudentList2();
-  for(Student s : studentList ){
-    System.out.println(s);
-  }
+            synchronized (d){
+                log.debug(PrintMarkWord.print(d));
+            }
+            log.debug(PrintMarkWord.print(d));
 
-  sqlSession.close();
+        },"t1").start();     
+    }
 }
 ```
 
-sout
+![WM-Screenshots-20220428114014](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/WM-Screenshots-20220428114014.png)
 
-```tex
-==>  Preparing: select s.id as sid,s.name as sname,t.id as tid,t.name as tname 					from student s,teacher t 
-				where s.tid = t.id; 
-==> Parameters: 
-<==    Columns: sid, sname, tid, tname
-<==        Row: 1, 小明, 1, 秦老师
-<==        Row: 2, 小红, 1, 秦老师
-<==        Row: 3, 小张, 1, 秦老师
-<==        Row: 4, 小李, 1, 秦老师
-<==        Row: 5, 小王, 1, 秦老师
-<==      Total: 5
-Student(id=1, name=小明, teacher=Teacher(id=1, name=秦老师, students=null))
-Student(id=2, name=小红, teacher=Teacher(id=1, name=秦老师, students=null))
-Student(id=3, name=小张, teacher=Teacher(id=1, name=秦老师, students=null))
-Student(id=4, name=小李, teacher=Teacher(id=1, name=秦老师, students=null))
-Student(id=5, name=小王, teacher=Teacher(id=1, name=秦老师, students=null))
-```
+这里始终只有一个线程获取锁，初始为偏向锁，调用对象的一致性哈希码之后，再尝试去获取锁，发现锁对象已经升级成轻量级锁，解锁后，变成无锁状态。
+
+>对于轻量级锁，获取锁的线程栈帧中有锁记录（Lock Record）空间，用于存储Mark Word的拷贝，官方称之为Displaced Mark Word，该拷贝中可以包含identity hash code，所以轻量级锁可以和identity hash code共存；对于重量级锁，ObjectMonitor类里有字段可以记录非加锁状态下的Mark Word，其中也可以存储identity hash code的值，所以重量级锁也可以和identity hash code共存。
 
 
 
-#### B.按照查询嵌套处理
+#### 8.4 撤销偏向锁 - 调用 wait/notify()
 
-> 子查询
+因为只有重量级锁才支持这两个方法。
 
-```xml
-<!--  1.先查出学生信息
-      2.根据查询出来的学生的tid，查询对应的老师 -->
-<select id="getStudentList2" resultMap="studentList2">
-  select * from student;
-</select>
-<resultMap id="studentList2" type="Student">
-  <result property="id" column="id"/>
-  <result property="name" column="name"/>
-  <association property="teacher" column="tid" javaType="Teacher" select="getTeacherById"/>
-</resultMap>
-
-<select id="getTeacherById" resultType="Teacher">
-  select * from teacher where id = #{id};
-</select>
-```
-
-如下写法是**错误**的
-
-```xml
-<select id="getStudentList2" resultMap="studentList2">
-  select * from student;
-</select>
-<resultMap id="studentList2" type="Student">
-  <result property="id" column="id"/>
-  <result property="name" column="name"/>
-  <!--  @Select("select * from teacher where id = #{tid}")
-              Teacher getTeacherById(@Param("tid") long id);        -->
-  <association property="teacher" column="tid" javaType="Teacher" select="getTeacherById"/>
-</resultMap>
-
-<!--如上写法是不行的
-    Exception: Mapped Statements collection does not contain value for com.ZHILIU.repository.StudentMapper.getTeacherById
-    getTeacherById  只能写在它自己的xml文件中 如下：
-    -->
-```
-
->​	不要以为TeacherMapper.xml中有 getTeacherById 的查询方法就以为可以直接使用，直接报异常它只能在自己的配置文件中找方法。
-
-
-
-sout (不用管students=null 没有映射而已)
-
-```tex
-==>  Preparing: select * from student; 
-==> Parameters: 
-<==    Columns: id, name, tid
-<==        Row: 1, 小明, 1
-====>  Preparing: select * from teacher where id = ?; 
-====> Parameters: 1(Integer)
-<====    Columns: id, name
-<====        Row: 1, 秦老师
-<====      Total: 1
-<==        Row: 2, 小红, 1
-<==        Row: 3, 小张, 1
-<==        Row: 4, 小李, 1
-<==        Row: 5, 小王, 1
-<==      Total: 5
-Student(id=1, name=小明, teacher=Teacher(id=1, name=秦老师, students=null))
-Student(id=2, name=小红, teacher=Teacher(id=1, name=秦老师, students=null))
-Student(id=3, name=小张, teacher=Teacher(id=1, name=秦老师, students=null))
-Student(id=4, name=小李, teacher=Teacher(id=1, name=秦老师, students=null))
-Student(id=5, name=小王, teacher=Teacher(id=1, name=秦老师, students=null))
-```
-
-
-
-### 9.4、一对多查询案例
-
---- 获取指定老师下的所有学生及老师信息
+测试：
 
 ```java
-public interface TeacherMapper {
-    //获取指定老师下的所有学生及老师信息
-    Teacher getTeacher1(@Param("tid") long id);
+/**
+ * -XX:BiasedLockingStartupDelay=0
+ */
+@Slf4j
+public class Test5 {
+    public static void main(String[] args) throws InterruptedException {
+        Dog d = new Dog();
 
-    //获取指定老师下的所有学生及老师信息
-    Teacher getTeacher2(@Param("tid") long id);
+        Thread t1= new Thread(()->{
+            log.debug(PrintMarkWord.print(d));
+            System.out.println("获取锁对象");
+            synchronized (d){
+                try {
+                    log.debug(PrintMarkWord.print(d));
+                    System.out.println("调用wait()方法");
+                    d.wait(10);
+                    log.debug(PrintMarkWord.print(d));
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+            System.out.println("释放锁");
+            log.debug(PrintMarkWord.print(d));
+        },"t1");
+        t1.start();
+        t1.join();
+
+        new Thread(()->{
+            System.out.println("等待t1结束后，线程t2再尝试获取");
+            synchronized (d){
+                log.debug(PrintMarkWord.print(d));
+            }
+        },"t2").start();
+
+    }
 }
 ```
 
+![WM-Screenshots-20220428120522](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/WM-Screenshots-20220428120522.png)
+
+可以观察到，初始状态为可偏向的，t1获取锁之后，偏向t1，调用wait()之后，锁对象升级成重量级锁，释放锁之后，之后再有线程去获取锁，都是走重量级锁流程。
 
 
-#### A.按照结果嵌套处理
 
-```xml
-<!-- 按照结果嵌套查询 -->
-<select id="getTeacher1" resultMap="teacherInfo1">
-  select s.id sid,s.name sname,t.name tname,t.id tid
-  from student s,teacher t
-  where s.tid = t.id and t.id = #{tid}
-</select>
+#### 8.5 撤销偏向锁-多线程访问
 
-<resultMap id="teacherInfo1" type="Teacher">
-  <result property="id" column="tid"/>
-  <result property="name" column="tname"/>
-  <!-- 复杂的属性，对象用association 集合用collection
-             javaType="" 指定属性的类型
-             ofType="" 集合中的泛型信息     -->
-  <collection property="students" ofType="Student">
-    <result property="id" column="sid"/>
-    <result property="name" column="sname"/>
-  </collection>
-</resultMap>
-```
+1.如果一个偏向锁对象已经偏向了一个线程t1(线程t1此时已经释放了锁)，此时另一个线程t2尝试来获取锁，(交替获取，没有发生锁的竞争)，此时锁对象会升级成轻量级锁。
 
-@Test
+2.如果当t2线程尝试获取锁时，t1线程还没有释放锁，此时发生了锁竞争，锁对象会升级成重量级锁。
+
+
+
+**偏向锁撤销, 升级轻量级锁：**
+
+使用`wait` 和 `notify` 来辅助实现，以便两个线程先后执行
 
 ```java
-@Test
-public void testTeacherMapper(){
-  //已经设置自动提交事务
-  SqlSession sqlSession = MyBatisUtils.getSqlSession();
+/**
+ * -XX:BiasedLockingStartupDelay=0
+ */
+@Slf4j
+public class Test3 {
 
-  TeacherMapper mapper = sqlSession.getMapper(TeacherMapper.class);
+    public static void main(String[] args) {
+        Dog d = new Dog();
 
-  Teacher teacher = mapper.getTeacher1(1L);
-  System.out.println("Teacher["+teacher.getId()+"---"+teacher.getName()+"]");
-  List<Student> students = teacher.getStudents();
-  for(Student s : students){
-    System.out.println(s);
-  }
+        new Thread(()->{
+            log.debug(PrintMarkWord.print(d));
+            synchronized (d){
+                log.debug(PrintMarkWord.print(d));
+            }
+            log.debug(PrintMarkWord.print(d));
 
-  sqlSession.close();
-}
-```
+            synchronized (String.class){
+                String.class.notify();
+            }
+        },"t1").start();
 
-sout
+        System.out.println();
+        new Thread(()->{
+            synchronized (String.class){
+                try {
+                    String.class.wait();
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
 
-```tex
-==>  Preparing: select s.id sid,s.name sname,t.name tname,t.id tid 
-	 			from student s,teacher t 
-	  			where s.tid = t.id and t.id = ? 
-==> Parameters: 1(Long)
-<==    Columns: sid, sname, tname, tid
-<==        Row: 1, 小明, 秦老师, 1
-<==        Row: 2, 小红, 秦老师, 1
-<==        Row: 3, 小张, 秦老师, 1
-<==        Row: 4, 小李, 秦老师, 1
-<==        Row: 5, 小王, 秦老师, 1
-<==      Total: 5
-Teacher[1---秦老师]
-Student(id=1, name=小明, teacher=null)
-Student(id=2, name=小红, teacher=null)
-Student(id=3, name=小张, teacher=null)
-Student(id=4, name=小李, teacher=null)
-Student(id=5, name=小王, teacher=null)
-```
-
-
-
-#### B.按照查询嵌套处理
-
-```xml
-<!-- 按照查询嵌套处理 -->
-<select id="getTeacher2" resultMap="teacherInfo2">
-  select * from teacher where id = #{tid};
-</select>
-
-<resultMap id="teacherInfo2" type="Teacher">
-  <id column="id" property="id"/>
-  <result column="name" property="name"/>
-  <collection property="students" column="id" ofType="Student" select="getStudentList"/>
-</resultMap>
-
-<select id="getStudentList" resultType="Student" >
-  select * from student where tid = #{tid};
-</select>
-```
-
-
-
-sout
-
-```tex
-==>  Preparing: select * from teacher where id = ?; 
-==> Parameters: 1(Long)
-<==    Columns: id, name
-<==        Row: 1, 秦老师
-====>  Preparing: select * from student where tid = ?; 
-====> Parameters: 1(Integer)
-<====    Columns: id, name, tid
-<====        Row: 1, 小明, 1
-<====        Row: 2, 小红, 1
-<====        Row: 3, 小张, 1
-<====        Row: 4, 小李, 1
-<====        Row: 5, 小王, 1
-<====      Total: 5
-<==      Total: 1
-Teacher[1---秦老师]
-Student(id=1, name=小明, teacher=null)
-Student(id=2, name=小红, teacher=null)
-Student(id=3, name=小张, teacher=null)
-Student(id=4, name=小李, teacher=null)
-Student(id=5, name=小王, teacher=null)
-```
-
-
-
-## 十、动态SQL
-
->模块七：mybatis-07
-
-[动态SQL](https://mybatis.org/mybatis-3/zh/dynamic-sql.html)
-
-动态SQL就是指根据不同的条件生成不同的SQL语句。
-
-- if
-- choose (when, otherwise)
-- trim (where, set)
-- foreach
-
-
-
----- 数据库环境搭建
-
-```sql
-drop table if exists `blog`;
-CREATE TABLE `blog`(
-`id` INT(20) NOT NULL AUTO_INCREMENT,
-`title` VARCHAR(100) NOT NULL,
-`author` VARCHAR(30) NOT NULL,
-`create_time` DATETIME NOT NULL,
-`views` INT(30) NOT NULL,
-PRIMARY KEY (`id`)
-)ENGINE=INNODB DEFAULT CHARSET=utf8;
-```
-
-
-
---- IDEA项目中环境
-
-Blog.java
-
-```java
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-public class Blog {
-    private long id;
-    private String title;
-    private String author;
-    //数据库表中字段是create_time
-    //在mybatis-config.xml中开启驼峰命名自动映射
-    private Date createTime;
-    private long views;
-}
-```
-
-mybatis-config.xml
-
-```xml
-<settings>
-  <setting name="logImpl" value="STDOUT_LOGGING"/>
-  <!-- 开启驼峰命名自动映射 -->
-  <setting name="mapUnderscoreToCamelCase" value="true"/>
-</settings>
-```
-
->mapUnderscoreToCamelCase
->
->是否开启驼峰命名自动映射，即从经典数据库列名 A_COLUMN 映射到经典 Java 属性名 aColumn。
->
->true | **false**
-
-
-
-BolgMapper.xml
-
-```xml
-public interface BlogMapper {
-
-    @Insert("insert into blog (title,author,create_time,views)" +
-            "values(#{title},#{author},#{createTime},#{views})")
-    int addBlog(Blog blog);
+            log.debug(PrintMarkWord.print(d));
+            synchronized (d){
+                log.debug(PrintMarkWord.print(d));
+            }
+            log.debug(PrintMarkWord.print(d));
+        },"t2").start();
+    }
 
 }
 ```
 
-插入数据
+结果:
+
+![WM-Screenshots-20220428110741](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/WM-Screenshots-20220428110741.png)
+
+输出结果，最开始使用的是偏向锁，但是第二个线程尝试获取对象锁时(前提是: 线程一已经释放掉锁了,也就是执行完synchroized代码块)，发现本来对象偏向的是线程一，那么偏向锁就会失效，加的就是轻量级锁
+
+
+
+某种测试结果：
+
+```
+@Slf4j
+public class Test2 {
+
+    public static void main(String[] args) throws InterruptedException {
+        Dog d = new Dog();
+
+        Thread t1 = new Thread(()->{
+            log.debug(PrintMarkWord.print(d));
+            synchronized (d){
+                log.debug(PrintMarkWord.print(d));
+            }
+            log.debug(PrintMarkWord.print(d));
+
+//            synchronized (String.class){
+//                String.class.notify();
+//            }
+        },"t1");
+        t1.start();
+
+
+        Thread t2 = new Thread(()->{
+//            synchronized (String.class){
+//                try {
+//                    String.class.wait();
+//                } catch (InterruptedException e) {
+//                    e.printStackTrace();
+//                }
+//            }
+
+            log.debug(PrintMarkWord.print(d));
+            synchronized (d){
+                log.debug(PrintMarkWord.print(d));
+            }
+            log.debug(PrintMarkWord.print(d));
+        },"t2");
+        t2.start();
+
+
+        System.out.println();
+        Thread.sleep(10000);
+        new Thread(()->{
+            log.debug(PrintMarkWord.print(d));
+            synchronized (d){
+                log.debug(PrintMarkWord.print(d));
+            }
+            log.debug(PrintMarkWord.print(d));
+        },"t3").start();
+
+
+    }
+
+}
+
+
+/*不同步下的某种测试结果*/
+// [t2] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000101
+// [t1] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000101
+// [t2] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000011 00100010 10110110 00011010
+// [t2] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000011 00100010 10110110 00011010
+// [t1] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000011 00100010 10110110 00011010
+// [t1] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000011 00100010 10110110 00011010
+// [t3] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000001
+// [t3] DEBUG Test2 - 00000000 00000000 00000000 00000000 00011111 10011100 11110101 11110000
+// [t3] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000001
+```
+
+
+
+
+
+#### 8.6 批量重偏向
+
+如果对象被多个线程访问，但是没有竞争 (上面撤销偏向锁就是这种情况: 一个线程执行完, 另一个线程再来执行, 没有竞争), **这时偏向T1的对象仍有机会重新偏向T2**,也就是说，不会把已偏向的锁升级成轻量级锁，而是会重新偏向另一个线程。发生的条件是撤销偏向锁阈值超过20次。
+
+测试：
 
 ```java
-@Test
-public void testInsert(){
-  //已经设置自动提交事务
-  SqlSession sqlSession = MyBatisUtils.getSqlSession();
 
-  BlogMapper mapper = sqlSession.getMapper(BlogMapper.class);
-  Blog blog = new Blog();
+/**
+ * -XX:BiasedLockingStartupDelay=0
+ */
+@Slf4j
+public class Test6 {
+    public static void main(String[] args) throws InterruptedException {
+        Vector<Dog> list = new Vector<>();
+        Thread t1 = new Thread(()->{
+            for (int i = 0; i < 30; i++) {
+                Dog d = new Dog();
+                list.add(d);
+                synchronized (d){
+                    log.debug(i+"\t"+ PrintMarkWord.print(d));
+                }
+            }
+        },"t1");
+        t1.start();
+        t1.join();
 
-  blog.setTitle("Mybatis");
-  blog.setAuthor("是风动");
-  blog.setCreateTime(new Date());
-  blog.setViews(9999);
-  mapper.addBlog(blog);
 
-  blog.setTitle("Java");
-  blog.setAuthor("是幡动");
-  blog.setViews(1000);
-  mapper.addBlog(blog);
-
-  blog.setTitle("Spring");
-  blog.setAuthor("莫敛此轻寒");
-  mapper.addBlog(blog);
-
-  blog.setTitle("微服务");
-  blog.setAuthor("莫敛此轻寒");
-  mapper.addBlog(blog);
-
-  sqlSession.close();
-
-  sqlSession.close();
+        Thread t2 = new Thread(()->{
+            log.debug("-------------------->");
+            for (int i = 0; i < 30; i++) {
+                Dog d = list.get(i);
+                log.debug(i+"\t"+PrintMarkWord.print(d));
+                synchronized (d){
+                    log.debug(i+"\t"+PrintMarkWord.print(d));
+                }
+                log.debug(i+"\t"+PrintMarkWord.print(d));
+            }
+        },"t2");
+        t2.start();
+    }
 }
 ```
 
+![WM-Screenshots-20220428144553](https://cdn.jsdelivr.net/gh/bestthezhi/images@master/juc/WM-Screenshots-20220428144553.png)
+
+可以看到，19次输出之后，发生了重新偏向。
 
 
-### IF
 
-BlogMapper.java
+#### 8.7 批量撤销偏向锁
 
-```xml
-//测试IF
-//参数也可以是Blog blog
-List<Blog> getBlogIF(Map<String,String> map);
-```
+当 撤销偏向锁的阈值超过40以后 ，就会将**整个类的对象**都改为**不可偏向**的，新建此类的对象也是不可偏向的。
 
-BlogMapper.xml
 
-```xml
-<select id="getBlogIF" resultType="Blog">
-  select * from blog where 1=1
-  
-  <!-- 没有1=1的话 where后面直接跟and 会报错
-       又或者后面所有条件都不成立 where后面什么都没有  
-       所以要配合其他标签使用     -->
-  <if test="author != null">
-    and author = "%"#{author}"%"
-  </if>
-  <if test="title != null">
-    and title = #{title}
-  </if>
-</select>
-```
 
-@Test
+### 9、同步省略 (锁消除)
+
+线程同步的代价是相当高的，同步的后果是降低并发性和性能。
+
+在动态编译同步块的时候，JIT编译器可以借助**逃逸分析**来判断同步块所使用的锁对象是否只能够被一个线程访问而没有被发布到其他线程。
+
+如果没有，那么JIT编译器在编译这个同步块的时候就会取消对这部分代码的同步。这样就能大大提高并发性和性能。这个取消同步的过程就叫同步省略，也叫锁消除。
+
+也许读者会有疑问,变量是否逃逸，对于虚拟机来说是需要使用复杂的过程间分析才能确定的，但是程序员自己应该是很清楚的,怎么会在明知道不存在数据争用的情况下还要求同步呢?这个问题的答案是:有许多同步措施并不是程序员自己加入的，同步的代码在Java程序中出现的频繁程度也许超过了大部分人的想象。我们来看看如下例子,这段非常简单的代码仅仅是输出三个字符串相加的结果，无论是源代码字面上，还是程序语义上都没有进行同步。
 
 ```java
-@Test
-public void testIF(){
-  SqlSession sqlSession = MyBatisUtils.getSqlSession();
-
-  BlogMapper mapper = sqlSession.getMapper(BlogMapper.class);
-
-  Map<String,String> map = new HashMap<>();
-  map.put("title","微服务");
-  map.put("author","轻寒");
-
-  System.out.println(mapper.getBlogIF(map));
-
-  sqlSession.close();
+public String concatString(String s1,String s2,String s3){
+    return s1 + s2 + s3;
 }
 ```
 
-
-
-### where
-
-> *where* 元素只会在子元素返回任何内容的情况下才插入 “WHERE” 子句。而且，若子句的开头为 “AND” 或 “OR”，*where* 元素也会将它们去除。
-
-```xml
-<select id="getBlogIF" resultType="Blog">
-  select * from blog
-  <where>
-    <if test="author != null">
-      author like "%"#{author}"%"
-    </if>
-    <if test="title != null">
-      and title = #{title}
-    </if>
-  </where>
-</select>
-```
-
-### set
-
-> *set* 元素会动态地在行首插入 SET 关键字，并会删掉额外的逗号
-
-```xml
-//测试set
-int updateBlogSet(Map<String,String> map);
-```
-
-```xml
-<update id="updateBlogSet"  parameterType="map">
-  update blog
-  <set>
-    <if test="title != null">
-      title = #{title},
-    </if>
-    <if test="author != null">
-      author = #{author},
-    </if>
-    <if test="views != null">
-      view = #{view};
-    </if>
-  </set>
-  where id = #{id};
-</update>
-```
+我们也知道、由于String是一个不可变的类，对字符串的连接操作总是通过生成新的String对象来进行的、因此Javac编译器会对String连接做自动优化。在JDK5之前,字符串加法会转化为StringBuffer对象的连续append()操作，在JDK 5及以后的版本中，会转化为StringBuilder对象的连续 append()操作。即代码可能会变成如下所示的样子。
 
 ```java
-@Test
-public void testSet(){
-  SqlSession sqlSession = MyBatisUtils.getSqlSession();
-
-  BlogMapper mapper = sqlSession.getMapper(BlogMapper.class);
-
-  Map<String,String> map = new HashMap<>();
-  //        map.put("title","微服务");
-  map.put("author","不是风动");
-  map.put("id","3");
-
-  System.out.println(mapper.updateBlogSet(map));
-
-  sqlSession.close();
+public String concatString(String s1,String s2,String s3){
+    StringBuffer sb = new StringBuffer();
+    sb.append(s1);
+    sb.append(s2);
+    sb.append(s3);
+    return sb.toString();
 }
 ```
 
+现在大家还认为这段代码没有涉及同步吗?每个 StringBuffer.append()方法中都有一个同步块，锁就是sb对象。虚拟机观察变量sb,经过逃逸分析后会发现它的动态作用域被限制在 concatString(方法内部。也就是sb的所有引用都永远不会逃逸到concatString()方法之外，其他线程无法访问到它，所以这里虽然有锁，但是可以被安全的消除掉。再解释执行时这里仍然会加锁，但在经过服务端编译器的即时编译之后，这段代码就会忽略所有的同步措施而直接执行。
 
 
-### trim
 
-> trim 标签中的 prefix 和 suffix 属性会被⽤于⽣成实际的 SQL 语句，会和标签内部的语句进⾏拼接，如果语句前后出现了 prefixOverrides 或者 suffixOverrides 属性中指定的值，MyBatis 框架会⾃动将其删除。
+**说明：**
 
-- 和 *where* 元素等价的自定义 trim 元素为：
-
-``` xml
-<trim prefix="WHERE" prefixOverrides="AND |OR ">
-  ...
-</trim>
-```
-
-*prefixOverrides* 属性会忽略通过管道符分隔的文本序列（注意此例中的空格是必要的）。上述例子会移除所有 *prefixOverrides* 属性中指定的内容，并且插入 *prefix* 属性中指定的内容。
-
-- 与 *set* 元素等价的自定义 *trim* 元素为：
-
-```xml
-<trim prefix="SET" suffixOverrides=",">
-  ...
-</trim>
-```
-
-覆盖了后缀值设置，并且自定义了前缀值。
-
-
-
-### choose,when,otherwise
-
-> 有时候，我们不想使用所有的条件，而只是想从多个条件中选择   **一个**  使用。针对这种情况，MyBatis 提供了 choose 元素，它有点像 Java 中的 switch 语句。
-
-BlogMapper.java
-
-```java
-//测试choose
-List<Blog> getBlogChoose(Map<String,String> map);
-```
-
-BlogMapper.xml
-
-```xml
-<select id="getBlogChoose" resultType="Blog">
-  select * from blog where
-  <choose>
-    <when test="title != null">
-      title = #{title}
-    </when>
-    <when test="author != null">
-      uthor = #{author}
-    </when>
-    <otherwise>
-      views > 2000
-    </otherwise>
-  </choose>
-</select>
-```
-
-@Test
-
-```java
-@Test
-public void testChoose(){
-  SqlSession sqlSession = MyBatisUtils.getSqlSession();
-
-  BlogMapper mapper = sqlSession.getMapper(BlogMapper.class);
-
-  Map<String,String> map = new HashMap<>();
-  //多个参数也只选择一个
-  map.put("title","微服务");
-  map.put("author","是风动");
-
-  System.out.println(mapper.getBlogChoose(map));
-
-  sqlSession.close();
-}
-```
-
-sout
-
-```tex
-==>  Preparing: select * from blog where title = ? 
-==> Parameters: 微服务(String)
-<==    Columns: id, title, author, create_time, views
-<==        Row: 4, 微服务, 莫敛此轻寒, 2022-01-13 09:38:52, 9999
-<==      Total: 1
-[Blog(id=4, title=微服务, author=莫敛此轻寒, createTime=Thu Jan 13 17:38:52 CST 2022, views=9999)]
-```
-
-
-
-### foreach
-
->动态 SQL 的另一个常见使用场景是对集合进行遍历（尤其是在构建 IN 条件语句的时候）。
->
->select * from blog where id in (1,2,3);
-
-
-
-```java
-//测试foreach
-List<Blog> getBlogForeach(@Param("ids") List<Integer> ids);
-```
-
->不加 @Param("ids")
->
->org.apache.ibatis.binding.BindingException:
->
-> Parameter 'ids' not found. Available parameters are [collection, list]
->
->也可以使用map：
->
->List<Blog> getBlogForeach(Map map);
->
->map.put("ids" , new ArrayList<Integer>())
->
->就可以直接取到 ids
-
-
-
-```xml
-<!--  select * from blog where id in (1,2,3)  -->
-<select id="getBlogForeach" resultType="Blog">
-  select * from blog
-  <where>
-    <foreach collection="ids" item="id" open="id in (" close=")" separator=",">
-      #{id}
-    </foreach>
-  </where>
-</select>
-```
-
-```java
-@Test
-public void testForeach(){
-  SqlSession sqlSession = MyBatisUtils.getSqlSession();
-
-  BlogMapper mapper = sqlSession.getMapper(BlogMapper.class);
-
-  List<Integer> ids = new ArrayList<>();
-  ids.add(1);
-  ids.add(2);
-  System.out.println(mapper.getBlogForeach(ids));
-
-  sqlSession.close();
-}
-```
-
-
-
-
-
-
-
-### SQL片段
-
-可以将一些功能的部分抽取出来，方便复用
-
-```xml
-<sql id="if-author-title">
-  <if test="author != null">
-    author like "%"#{author}"%"
-  </if>
-  <if test="title != null">
-    and title = #{title}
-  </if>
-</sql>
-
-<select id="getBlogIF" resultType="Blog">
-  select * from blog
-  <where>
-    <include refid="if-author-title"></include>
-  </where>
-</select>
-```
-
-注意：
-
-- 最好基于单表来定义SQL片段
-- 不要存在where标签
-
-
-
-## 十一、MyBatis 缓存
-
-> 模块八：mybatis-08
-
-​	使⽤MyBatis缓存可以**减少 Java 应⽤与数据库的交互次数，从⽽提升程序的运⾏效率**。⽐如查询出 id = 1 的对象，第⼀次查询出之后会⾃动将该对象保存到缓存中，当下⼀次查询时，直接从缓存中取出对象即可，⽆需再次访问数据库。
-
-
-
-### 一级缓存
-
-> SqlSession 级别，默认开启，并且不能关闭
-
-​	操作数据库时需要创建 SqlSession 对象，在对象中有⼀个 HashMap ⽤于存储缓存数据，不同的SqlSession 之间缓存数据区域是互不影响的。sqlSession关闭，缓存也随着消失。
-
-​	⼀级缓存的作⽤域是 SqlSession 范围的，当在同⼀个 SqlSession 中执⾏两次相同的 SQL 语句事，第⼀次执⾏完毕会将结果保存到缓存中，第⼆次查询时直接从缓存中获取。
-
-​	需要注意的是，如果 SqlSession 执⾏了 DML 操作（insert、update、delete），MyBatis 自动将缓存清空以保证数据的准确性。也可以手动清理缓存 sqlSession.clearCache();
-
-
-
-UserMapper.java
-
-```java
-public interface UserMapper {
-
-    @Select("select * from user where id = #{id}")
-    User getUserById(long id);
-
-    @Update("update user set name = #{name},pwd=#{pwd} where id = #{id}")
-    int updateUser(User user);
-
-}
-```
-
-
-
-@Test  //直接取两次
-
-```java
-@Test
-public void test1(){
-  SqlSession sqlSession = MyBatisUtils.getSqlSession();
-
-  UserMapper mapper = sqlSession.getMapper(UserMapper.class);
-
-  System.out.println(mapper.getUserById(1));
-
-  System.out.println("-----------------------");
-
-  System.out.println(mapper.getUserById(1));
-
-  sqlSession.close();
-}
-```
-
-sout
-
-```tex
-Opening JDBC Connection
-Created connection 1456339771.
-Setting autocommit to false on JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@56cdfb3b]
-==>  Preparing: select * from user where id = ? 
-==> Parameters: 1(Long)
-<==    Columns: id, name, pwd
-<==        Row: 1, 等风, 123456
-<==      Total: 1
-User(id=1, name=等风, pwd=123456)
------------------------
-User(id=1, name=等风, pwd=123456)
-Resetting autocommit to true on JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@56cdfb3b]
-Closing JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@56cdfb3b]
-Returned connection 1456339771 to pool.
-```
-
-
-
-@Test  //中间执行DML语句，缓存清除
-
-```java
-@Test
-public void test1(){
-  SqlSession sqlSession = MyBatisUtils.getSqlSession();
-
-  UserMapper mapper = sqlSession.getMapper(UserMapper.class);
-
-  System.out.println(mapper.getUserById(1));
-
-  System.out.println("-----------------------");
-
-  mapper.updateUser(new User(5L,"GodZ","123456"));
-  
-  System.out.println("-----------------------");
-
-  System.out.println(mapper.getUserById(1));
-
-  sqlSession.close();
-}
-```
-
-sout
-
-```tex
-Opening JDBC Connection
-Created connection 900636745.
-Setting autocommit to false on JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@35aea049]
-==>  Preparing: select * from user where id = ? 
-==> Parameters: 1(Long)
-<==    Columns: id, name, pwd
-<==        Row: 1, 等风, 123456
-<==      Total: 1
-User(id=1, name=等风, pwd=123456)
------------------------
-==>  Preparing: update user set name = ?,pwd=? where id = ? 
-==> Parameters: GodZ(String), 123456(String), 5(Long)
-<==    Updates: 1
------------------------
-==>  Preparing: select * from user where id = ? 
-==> Parameters: 1(Long)
-<==    Columns: id, name, pwd
-<==        Row: 1, 等风, 123456
-<==      Total: 1
-User(id=1, name=等风, pwd=123456)
-Rolling back JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@35aea049]
-Resetting autocommit to true on JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@35aea049]
-Closing JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@35aea049]
-Returned connection 900636745 to pool.
-```
-
-
-
-### 二级缓存
-
-> Mapper 级别，默认关闭，可以开启。
-
-​	使⽤⼆级缓存时，多个 SqlSession 使⽤同⼀个 Mapper 的 SQL 语句操作数据库，得到的数据会存在⼆级缓存区，同样是使⽤ HashMap 进⾏数据存储，相⽐较于⼀级缓存，⼆级缓存的范围更⼤，多个SqlSession 可以共⽤⼆级缓存，⼆级缓存是跨 SqlSession 的。
-
-​	⼆级缓存是多个 SqlSession 共享的，其作⽤域是 Mapper 的同⼀个 namespace，不同的 SqlSession两次执⾏相同的 namespace 下的 SQL 语句，参数也相等，**则当第⼀个sqlsession提交或关闭将数据保存到⼆级缓存中之后**，第⼆次可直接从⼆级缓存中取出数据（即会话关闭了，一级缓存存入二级缓存）。
-
-
-
-mybatis-config.xml  配置开启MyBatis ⾃带的⼆级缓存
-
-```xml
-<settings>
-  <setting name="logImpl" value="STDOUT_LOGGING"/>
-  <!-- 开启⼆级缓存  -->
-  <setting name="cacheEnabled" value="true"/>
-</settings>
-```
-
-UserMapper.xml
-
-```xml
-<?xml version="1.0" encoding="UTF-8" ?>
-<!DOCTYPE mapper
-        PUBLIC "-//mybatis.org//DTD Config 3.0//EN"
-        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
-<mapper>
-
-    <cache/>
-
-</mapper>
-```
-
-实体类实现序列化接⼝
-
-```java
-@Data
-@NoArgsConstructor
-@AllArgsConstructor
-public class User implements Serializable {
-    private long id;
-    private String name;
-    private String pwd;
-}
-```
-
-
-
-@Test
-
-```java
-@Test
-public void test1(){
-  SqlSession sqlSession = MyBatisUtils.getSqlSession();
-
-  UserMapper mapper = sqlSession.getMapper(UserMapper.class);
-  User user1 = mapper.getUserById(1);
-  System.out.println(user1);
-
-  sqlSession.close();
-
-  System.out.println("---------------------");
-
-  sqlSession = MyBatisUtils.getSqlSession();
-
-  mapper = sqlSession.getMapper(UserMapper.class);
-  User user2 = mapper.getUserById(1);
-  System.out.println(user2);
-
-  System.out.println("---------------------");
-  System.out.println("user1 == user2" + (user1 == user2));
-
-  sqlSession.close();
-}
-```
-
-sout
-
-```tex
-Opening JDBC Connection
-Created connection 1150963491.
-Setting autocommit to false on JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@449a4f23]
-==>  Preparing: select * from user where id = ?; 
-==> Parameters: 1(Long)
-<==    Columns: id, name, pwd
-<==        Row: 1, 等风, 123456
-<==      Total: 1
-User(id=1, name=等风, pwd=123456)
-Resetting autocommit to true on JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@449a4f23]
-Closing JDBC Connection [com.mysql.cj.jdbc.ConnectionImpl@449a4f23]
-Returned connection 1150963491 to pool.
----------------------
-Cache Hit Ratio [com.ZHILIU.repository.UserMapper]: 0.5
-User(id=1, name=等风, pwd=123456)
----------------------
-user1 == user2false
-```
-
-> User实现序列化可能是导致 user1==user2:false 的原因
-
-查询是先看二级缓存 在看一级缓存 最后查询数据库
-
-
-
-### Ehcache二级缓存
-
-Maven依赖
-
-```xml
-<dependency>
- <groupId>org.mybatis</groupId>
- <artifactId>mybatis-ehcache</artifactId>
- <version>1.0.0</version>
-</dependency>
-<dependency>
- <groupId>net.sf.ehcache</groupId>
- <artifactId>ehcache-core</artifactId>
- <version>2.4.3</version>
-</dependency>
-```
-
-添加Ehcache.xml
-
-```xml
-<ehcache xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-         xsi:noNamespaceSchemaLocation="../config/ehcache.xsd">
-  <diskStore/>
-  <defaultCache
-                maxElementsInMemory="1000"
-                maxElementsOnDisk="10000000"
-                eternal="false"
-                overflowToDisk="false"
-                timeToIdleSeconds="120"
-                timeToLiveSeconds="120"
-                diskExpiryThreadIntervalSeconds="120"
-                memoryStoreEvictionPolicy="LRU">
-  </defaultCache>
-</ehcache>
-```
-
-mybatis-config.xml 配置开启⼆级缓存
-
-```xml
-<settings>
- <!-- 开启⼆级缓存 -->
- <setting name="cacheEnabled" value="true"/>
-</settings>
-```
-
-Mapper.xml 中配置⼆级缓存
-
-```xml
-<cache type="org.mybatis.caches.ehcache.EhcacheCache">
-  <!-- 缓存创建之后，最后⼀次访问缓存的时间⾄缓存失效的时间间隔 -->
-  <property name="timeToIdleSeconds" value="3600"/>
-  <!-- 缓存⾃创建时间起⾄失效的时间间隔 -->
-  <property name="timeToLiveSeconds" value="3600"/>
-  <!-- 缓存回收策略，LRU表示移除近期使⽤最少的对象 -->
-  <property name="memoryStoreEvictionPolicy" value="LRU"/>
-</cache>
-```
-
-实体类不需要实现序列化接口
-
-
-
-
+由于Java底层的原理在网上的解释"万紫千红"，并且程序的运行结果可能会与JDK版本等各种因素有关，我也翻阅了很多资料想尽可能地 把原理给搞清。上面的陈述不一定十分的精准，如果自己觉得那里有问题的话还是要自己去找权威的资料解决。锁优化的知识在《深入理解Java虚拟机》中有描述，也可以翻阅《Java并发编程的艺术》。
 

@@ -407,7 +407,7 @@ iterrupt..
 打断标记为:false
 java.lang.InterruptedException: sleep interrupted
 	at java.lang.Thread.sleep(Native Method)
-	at com.guizy.ThreadPrintDemo.lambda$main$0(ThreadPrintDemo.java:14)
+	at top.thezhi.ThreadPrintDemo.lambda$main$0(ThreadPrintDemo.java:14)
 	at java.lang.Thread.run(Thread.java:748)
 ```
 

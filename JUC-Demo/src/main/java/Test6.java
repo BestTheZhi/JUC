@@ -4,6 +4,8 @@ import top.THEZHI.utils.Person;
 import top.THEZHI.utils.PrintMarkWord;
 
 import java.util.Vector;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /**
  * -XX:BiasedLockingStartupDelay=0
@@ -57,5 +59,7 @@ public class Test6 {
             log.debug(PrintMarkWord.print(p));
         },"t4");
         t4.start();
+
+
     }
 }

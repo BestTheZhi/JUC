@@ -29,5 +29,8 @@ public class WatiTest1 {
         Thread.sleep(200);
         System.out.println(t1.getState());
 
+
+
+
     }
 }

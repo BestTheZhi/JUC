@@ -1,6 +1,7 @@
 import lombok.extern.slf4j.Slf4j;
 import top.THEZHI.utils.Dog;
 import top.THEZHI.utils.PrintMarkWord;
+import top.THEZHI.utils.Sleeper;
 
 /**
  * @author ZHI LIU
@@ -14,8 +15,10 @@ public class Test2 {
 
         Thread t1 = new Thread(()->{
             log.debug(PrintMarkWord.print(d));
+            Sleeper.sleep(1);
             synchronized (d){
                 log.debug(PrintMarkWord.print(d));
+                Sleeper.sleep(2);
             }
             log.debug(PrintMarkWord.print(d));
 
@@ -36,8 +39,10 @@ public class Test2 {
 //            }
 
             log.debug(PrintMarkWord.print(d));
+            Sleeper.sleep(2);
             synchronized (d){
                 log.debug(PrintMarkWord.print(d));
+
             }
             log.debug(PrintMarkWord.print(d));
         },"t2");
@@ -58,3 +63,15 @@ public class Test2 {
     }
 
 }
+
+
+/*不同步下的某种测试结果*/
+// [t2] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000101
+// [t1] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000101
+// [t2] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000011 00100010 10110110 00011010
+// [t2] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000011 00100010 10110110 00011010
+// [t1] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000011 00100010 10110110 00011010
+// [t1] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000011 00100010 10110110 00011010
+// [t3] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000001
+// [t3] DEBUG Test2 - 00000000 00000000 00000000 00000000 00011111 10011100 11110101 11110000
+// [t3] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000001

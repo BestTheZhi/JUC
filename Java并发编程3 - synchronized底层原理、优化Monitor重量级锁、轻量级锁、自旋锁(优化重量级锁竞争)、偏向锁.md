@@ -21,7 +21,7 @@
 
 
 
-Makr Word(存储对象自身的运行时数据，如哈希码，GC分代年龄等，在32位和64位的Java虚拟机中分别会占用32或64个比特)
+Mark Word(存储对象自身的运行时数据，如哈希码，GC分代年龄等，在32位和64位的Java虚拟机中分别会占用32或64个比特)
 
 以 32 位虚拟机为例,普通对象的对象头结构如下，其中的`Klass Word`为`类型指针`，指向`方法区`对应的`Class对象`；
 
@@ -169,7 +169,7 @@ eg: 线程A来操作临界区的资源, 给资源加锁,到执行完临界区代
 
 ![cc79](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/cc79.png)
 
-让锁记录中的Object reference指向锁对象地址，并且尝试用CAS(compare and sweep)将栈帧中的锁记录的(lock record 地址 00)替换Object对象的Mark Word，将Mark Word 的值(01)存入锁记录(lock record地址)中 ------相互替换
+让锁记录中的Object reference指向锁对象地址，并且尝试用CAS(compare and swap)将栈帧中的锁记录的(lock record 地址 00)替换Object对象的Mark Word，将Mark Word 的值(01)存入锁记录(lock record地址)中 ------相互替换
 
 ![7660](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/7660.png)
 
@@ -271,12 +271,12 @@ public static void method2() {
 
 在`轻量级的锁`中，我们可以发现，如果同一个线程对同一个对象进行`重入锁`时，**也需要执行CAS替换操作，这是有点耗时。**
 
-那么java6开始引入了`偏向锁`，将进入临界区的线程的ID, 直接设置给锁对象的Mark word, 下次该线程又获取锁, 发现线程ID是自己, 就不需要CAS操作了。
+那么JDK 6开始引入了`偏向锁`，将进入临界区的线程的ID, 直接设置给锁对象的Mark word, 下次该线程又获取锁, 发现线程ID是自己, 就不需要CAS操作了。
 
 - 升级为轻量级锁的情况 (会进行偏向锁撤销) : 获取偏向锁的时候, 发现线程ID不是自己的, 此时通过CAS替换操作, 操作成功了, 此时该线程就获得了锁对象。( 此时是交替访问临界区, 撤销偏向锁, 升级为轻量级锁)
 - 升级为重量级锁的情况 (会进行偏向锁撤销) : 获取偏向锁的时候, 发现线程ID不是自己的, 此时通过CAS替换操作, 操作失败了, 此时说明发生了锁竞争。( 此时是多线程访问临界区, 撤销偏向锁, 升级为重量级锁)
 
-偏向锁可以提高带有同步但无竞争的程序性能，但它同样是一个带有效益权衡性质的优化，也就是说它并非总是对程序运行有利。如果程序中大多数的锁都总是被多个不同的线程访问，那么偏向模式就是多余的(会撤销偏向锁),可以使用参数`-XX:UseBiasedLocking`来禁止锁优化反而可以提升性能。
+偏向锁可以提高带有同步但无竞争的程序性能，但它同样是一个带有效益权衡性质的优化，也就是说它并非总是对程序运行有利。如果程序中大多数的锁都总是被多个不同的线程访问，那么偏向模式就是多余的(会撤销偏向锁),可以使用参数`-XX:-UseBiasedLocking`来禁止锁优化反而可以提升性能。
 
 
 
@@ -564,6 +564,79 @@ public class Test3 {
 ![WM-Screenshots-20220428110741](https://images.weserv.nl/?url=raw.githubusercontent.com/BestTheZhi/images/master/juc/WM-Screenshots-20220428110741.png)
 
 输出结果，最开始使用的是偏向锁，但是第二个线程尝试获取对象锁时(前提是: 线程一已经释放掉锁了,也就是执行完synchroized代码块)，发现本来对象偏向的是线程一，那么偏向锁就会失效，加的就是轻量级锁
+
+
+
+某种测试结果：
+
+```
+@Slf4j
+public class Test2 {
+
+    public static void main(String[] args) throws InterruptedException {
+        Dog d = new Dog();
+
+        Thread t1 = new Thread(()->{
+            log.debug(PrintMarkWord.print(d));
+            synchronized (d){
+                log.debug(PrintMarkWord.print(d));
+            }
+            log.debug(PrintMarkWord.print(d));
+
+//            synchronized (String.class){
+//                String.class.notify();
+//            }
+        },"t1");
+        t1.start();
+
+
+        Thread t2 = new Thread(()->{
+//            synchronized (String.class){
+//                try {
+//                    String.class.wait();
+//                } catch (InterruptedException e) {
+//                    e.printStackTrace();
+//                }
+//            }
+
+            log.debug(PrintMarkWord.print(d));
+            synchronized (d){
+                log.debug(PrintMarkWord.print(d));
+            }
+            log.debug(PrintMarkWord.print(d));
+        },"t2");
+        t2.start();
+
+
+        System.out.println();
+        Thread.sleep(10000);
+        new Thread(()->{
+            log.debug(PrintMarkWord.print(d));
+            synchronized (d){
+                log.debug(PrintMarkWord.print(d));
+            }
+            log.debug(PrintMarkWord.print(d));
+        },"t3").start();
+
+
+    }
+
+}
+
+
+/*不同步下的某种测试结果*/
+// [t2] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000101
+// [t1] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000101
+// [t2] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000011 00100010 10110110 00011010
+// [t2] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000011 00100010 10110110 00011010
+// [t1] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000011 00100010 10110110 00011010
+// [t1] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000011 00100010 10110110 00011010
+// [t3] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000001
+// [t3] DEBUG Test2 - 00000000 00000000 00000000 00000000 00011111 10011100 11110101 11110000
+// [t3] DEBUG Test2 - 00000000 00000000 00000000 00000000 00000000 00000000 00000000 00000001
+```
+
+
 
 
 
